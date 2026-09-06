@@ -1,0 +1,16 @@
+node_modules/
+out/
+dist/
+*.vsix
+
+# Agent scratch output - see AGENTS.md, "Scratch output lives in one ignored folder".
+.gate/
+
+# The notes file is per-developer state, not a deliverable.
+.ainotes.json
+
+CLAUDE.md
+AGENTS.md
+.ainotes
+.claude
+.vscode

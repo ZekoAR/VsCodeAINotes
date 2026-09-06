@@ -1,0 +1,138 @@
+{
+  "name": "ainotes",
+  "displayName": "AI Notes",
+  "description": "A notes panel bound to a Claude Code session, stored in a dot-file in the workspace.",
+  "version": "1.3.0",
+  "publisher": "arcticrobots",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Notebooks",
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onWebviewPanel:ainotes.editor"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ainotes",
+          "title": "AI Notes",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "ainotes": [
+        {
+          "id": "ainotes.sidePanel",
+          "name": "Notes",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ainotes.newNote",
+        "title": "New Note Editor",
+        "category": "AI Notes",
+        "icon": "$(add)"
+      },
+      {
+        "command": "ainotes.pickSession",
+        "title": "Pick Claude Session",
+        "category": "AI Notes",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "ainotes.save",
+        "title": "Save Notes Now",
+        "category": "AI Notes",
+        "icon": "$(save)"
+      },
+      {
+        "command": "ainotes.openStoreFile",
+        "title": "Open Notes File",
+        "category": "AI Notes",
+        "icon": "$(go-to-file)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "ainotes.newNote",
+          "when": "view == ainotes.sidePanel",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ainotes.openStoreFile",
+          "when": "view == ainotes.sidePanel",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "ainotes.pickSession",
+          "when": "activeWebviewPanelId == ainotes.editor",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ainotes.save",
+          "when": "activeWebviewPanelId == ainotes.editor",
+          "group": "navigation@2"
+        },
+        {
+          "command": "ainotes.openStoreFile",
+          "when": "activeWebviewPanelId == ainotes.editor",
+          "group": "navigation@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AI Notes",
+      "properties": {
+        "ainotes.storeFileName": {
+          "type": "string",
+          "default": ".ainotes.json",
+          "markdownDescription": "Name of the dot-file, relative to the workspace folder root, that holds the notes text and the bound session."
+        },
+        "ainotes.autosaveDelayMs": {
+          "type": "number",
+          "default": 800,
+          "minimum": 100,
+          "maximum": 10000,
+          "description": "Idle time in milliseconds after the last keystroke before the notes are written to disk."
+        },
+        "ainotes.sessionHistoryLimit": {
+          "type": "number",
+          "default": 25,
+          "minimum": 0,
+          "maximum": 200,
+          "description": "How many past (not currently running) sessions for this workspace the picker lists below the live ones. Set to 0 to list live sessions only."
+        },
+        "ainotes.claudeHome": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Override the Claude Code home directory that is scanned for sessions. Empty means `$CLAUDE_CONFIG_DIR`, else `~/.claude`."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --allow-missing-repository",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.0",
+    "typescript": "^5.5.0"
+  }
+}
