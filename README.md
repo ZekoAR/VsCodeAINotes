@@ -150,4 +150,10 @@ Then press `F5` ("Run Extension") to launch an Extension Development Host.
 `dist/ainotes-<version>.vsix` and installs it with `code --install-extension --force`. Reload the
 window afterwards to pick it up.
 
-Agent rules for this repository are in `AGENTS.md` (not shipped in the .vsix).
+## Install
+
+
+```
+.\build.cmd --install
+```
+This builds the .vsix file and installs it locally.
