@@ -77,6 +77,40 @@ silently overwrite each other - unless a panel has unsaved keystrokes, which are
 `.ainotes.json` is git-ignored by default: it is per-developer state, not a deliverable. Remove the
 entry from `.gitignore` if you want the notes committed.
 
+### Switching a note editor's session
+
+A note belongs to a session, so switching an editor's session moves the EDITOR, not the note. The
+notes on screen stay with the session they were written for, and the editor lands on the target
+session's notes - the ones it already has, or an empty note if it has none. Notes written for one
+session are never re-filed under another.
+
+The one exception is a note connected to nothing, which has no session to leave anything behind in
+and is therefore filed under the target in place. An editor in that state shows a *Select AI Session*
+button and no text field at all, so a new note is always empty when it is filed. A note that was
+disconnected keeps its text parked in the file and gets it back when it is connected again.
+
+A note left behind with nothing in it is dropped rather than kept as an empty row in the file. If the
+target session's notes are already open in another tab, that tab is revealed instead - two tabs on
+one note would fight over its text.
+
+### After a window reload
+
+Reloading the window restarts Claude Code's session, and the notes tab comes back first. Measured on
+this machine, 18 seconds passed between the reload and the session registering in
+`~/.claude/sessions`, so the first look always reports the session as gone and means nothing.
+
+A restored tab therefore looks again at 0.4, 1.2, 2.5, 4 and 6 seconds. If the session it is bound to
+comes back in that window, nothing else happens - it was never really disconnected. Only when the
+last attempt still finds it gone is the session treated as ended, and the editor moves onto the
+session this window is working with: the one named by the active Claude tab's caption, or the single
+session running in this folder. It says so in the status bar when it does, because that changes the
+text on screen without being asked.
+
+If nothing can be resolved - no Claude tab, or two running sessions and no way to tell them apart -
+the editor stays where it is and shows the usual banner, which carries a **Reconnect to Active**
+button beside **Switch AI Session**. Notes connected to nothing are left alone: an editor that was
+never bound has nothing to reconnect to.
+
 ## How sessions are found
 
 Two sources, because they answer different questions:
@@ -119,11 +153,29 @@ The transcript folder name is the workspace path with every non-alphanumeric cha
 a dash (`c:\D\AINotes` becomes `c--D-AINotes`). VS Code and Claude Code do not always agree on the
 drive letter's case, so the folder is matched case-insensitively against what is on disk.
 
+### Why a Claude tab is identified by its caption
+
+*Bind to Active Claude Session* reads the tab's caption, which looks indirect until you try the
+alternatives. Dragging a Claude tab into a note editor delivers nothing to build on: VS Code fills a
+tab drag's data transfer only for editors that resolve to a resource, a webview editor resolves to
+none, and a plain tab drag suppresses even the `text/plain` fallback. The webview does receive the
+drop if Shift is held, because that restores pointer events on the iframe, but what arrives is empty.
+Nor is there a contract to fall back on: the extension API documents drag and drop for tree views and
+text editors only, never for webviews, and the request for webview drag-and-drop events was closed as
+out of scope.
+
+The tab itself carries no more: `TabInputWebview` exposes a view type and nothing else - no uri, no
+panel handle - so a caption is the only identity a Claude tab has. Claude Code sets that caption to
+the session's own title, which is the same string this extension reads out of the transcript, so the
+two can be matched. Claude Code's own extension resolves its tab commands the same way, and gives up
+the same way when two tabs cannot be told apart.
+
 ## Commands
 
 | Command | Does |
 | --- | --- |
 | `AI Notes: New Note Editor` | Opens a new, unconnected note editor |
+| `AI Notes: Bind to Active Claude Session` | Connects the note editor that has focus to the session this window is working with: the Claude Code tab selected in its own group, else the single session running in this folder. Falls back to the quick-pick when neither resolves |
 | `AI Notes: Pick Claude Session` | Connects the note editor that has focus, as a quick-pick. Each editor has its own list; this is for the command palette |
 | `AI Notes: Save Notes Now` | Flushes pending keystrokes to disk |
 | `AI Notes: Open Notes File` | Opens `.ainotes.json` in an editor tab |

@@ -132,6 +132,23 @@ export class NotesWorkspace implements vscode.Disposable {
 		return this.note(note.id) ?? note;
 	}
 
+	/** The note already filed under a session, if any. */
+	noteIdForSession(sessionId: string): string | undefined {
+		return this.doc.notes.find(note => note.session?.id === sessionId)?.id;
+	}
+
+	/** Drop a note from the file. */
+	deleteNote(id: string): void {
+		if (!this.doc.notes.some(note => note.id === id)) {
+			return;
+		}
+		this.doc = { ...this.doc, notes: this.doc.notes.filter(note => note.id !== id) };
+		this.resolved.delete(id);
+		this.dirty = true;
+		this.saveNow();
+		this.onChanged.fire({ textChanged: false });
+	}
+
 	setText(id: string, text: string, origin?: unknown): void {
 		const note = this.note(id);
 		if (!note || this.isReadOnly(id)) {
@@ -210,6 +227,29 @@ export class NotesWorkspace implements vscode.Disposable {
 		return Boolean(note?.session) && !this.resolved.get(id)?.running;
 	}
 
+	/**
+	 * The cheap half of `refresh`: are the bound sessions running? No transcript is read.
+	 *
+	 * Public because a restored tab polls it while it waits for Claude Code to come back after a
+	 * window reload, and paying a 512 KB transcript read per note per attempt would be waste.
+	 */
+	refreshLiveness(): void {
+		const home = this.claudeHomeSetting();
+		let changed = false;
+		for (const note of this.doc.notes) {
+			const running = note.session ? isSessionRunning(note.session.id, home) : false;
+			const previous = this.resolved.get(note.id);
+			if (previous?.running === running) {
+				continue;
+			}
+			this.resolved.set(note.id, { label: previous?.label, running });
+			changed = true;
+		}
+		if (changed) {
+			this.onChanged.fire({ textChanged: false });
+		}
+	}
+
 	/** Re-read every bound note's title and whether its session is still running. */
 	refresh(): void {
 		let changed = false;
@@ -239,6 +279,39 @@ export class NotesWorkspace implements vscode.Disposable {
 				pid: session.pid
 			}))
 		);
+	}
+
+	/**
+	 * The session a Claude Code tab caption names, or nothing when that cannot be told for certain.
+	 *
+	 * Claude Code sets its tab caption to the session's own title, so the caption is compared against
+	 * the title read out of that same transcript. A caption that matches nothing, or that two
+	 * sessions answer to, resolves to nothing at all - the caller falls back to the picker rather
+	 * than filing a note against a guess.
+	 */
+	sessionIdForLabel(label: string): string | undefined {
+		const wanted = label.trim();
+		if (!wanted) {
+			return undefined;
+		}
+		this.scanned = this.scan();
+		const matches = this.scanned.filter(
+			session => session.title?.trim() === wanted || session.firstPrompt?.trim() === wanted
+		);
+		return matches.length === 1 ? matches[0].sessionId : undefined;
+	}
+
+	/**
+	 * The one Claude session running in this workspace, when there is exactly one.
+	 *
+	 * The fallback for identifying a window's session when no tab caption resolves - at startup a
+	 * Claude tab is often still captioned "Claude Code", before its session has been titled. Two
+	 * running sessions is a genuine tie and resolves to nothing.
+	 */
+	soleLiveSessionId(): string | undefined {
+		this.scanned = this.scan();
+		const live = this.scanned.filter(session => session.live);
+		return live.length === 1 ? live[0].sessionId : undefined;
 	}
 
 	/**
@@ -286,8 +359,8 @@ export class NotesWorkspace implements vscode.Disposable {
 		return sortRows(rows);
 	}
 
-	/** Bind a note to a session. */
-	bind(noteId: string, sessionId: string): void {
+	/** Bind a note to a session. False when this workspace can resolve no such session. */
+	bind(noteId: string, sessionId: string): boolean {
 		let session = this.scanned.find(candidate => candidate.sessionId === sessionId);
 		if (!session) {
 			// The scan cache is only warm once some list has been drawn. Binding must not depend
@@ -297,7 +370,7 @@ export class NotesWorkspace implements vscode.Disposable {
 		}
 		const stored = this.doc.notes.find(note => note.session?.id === sessionId)?.session;
 		if (!session && !stored) {
-			return;
+			return false;
 		}
 		this.setSession(noteId, {
 			id: sessionId,
@@ -306,10 +379,61 @@ export class NotesWorkspace implements vscode.Disposable {
 			pid: session?.pid ?? stored?.pid,
 			boundAt: new Date().toISOString()
 		});
+		return true;
 	}
 
-	/** The quick-pick session picker, for entry points with no panel open to draw a list in. */
-	async pickSession(noteId: string): Promise<void> {
+	/**
+	 * Move an editor onto the session it should now show, and answer which note it lands on.
+	 *
+	 * A note belongs to a session, so switching an editor's session is NOT a rename of the note on
+	 * screen: the note being left keeps its own text under its own session, and the editor lands on
+	 * the target session's note - the existing one, or a fresh empty one. Without this, switching
+	 * re-filed one session's notes under another and the first session was left with none.
+	 *
+	 * The one exception is a note connected to nothing, which has no session to leave anything behind
+	 * in and is filed under the target in place. A new note is always empty when that happens - an
+	 * editor connected to nothing shows no text field - and a note parked by disconnecting gets its
+	 * text back when it is filed again.
+	 *
+	 * A note left behind holding nothing is dropped rather than kept as an empty row in the file.
+	 */
+	attachToSession(noteId: string, sessionId: string): string {
+		const note = this.note(noteId);
+		if (!note || note.session?.id === sessionId) {
+			return noteId;
+		}
+		const existing = this.doc.notes.find(
+			candidate => candidate.id !== noteId && candidate.session?.id === sessionId
+		);
+		if (existing) {
+			this.discardIfEmpty(noteId);
+			return existing.id;
+		}
+		if (!note.session) {
+			this.bind(noteId, sessionId);
+			return noteId;
+		}
+		const fresh = newNote();
+		this.doc = { ...this.doc, notes: [...this.doc.notes, fresh] };
+		this.dirty = true;
+		if (!this.bind(fresh.id, sessionId)) {
+			// Neither the scan nor the file names that session, so there is nowhere to move to.
+			this.doc = { ...this.doc, notes: this.doc.notes.filter(entry => entry.id !== fresh.id) };
+			return noteId;
+		}
+		this.discardIfEmpty(noteId);
+		return fresh.id;
+	}
+
+	/**
+	 * The quick-pick session picker, for entry points with no panel open to draw a list in.
+	 *
+	 * It only ASKS. Applying the answer is the caller's, because moving an editor onto another
+	 * session's notes is more than a field change on this note - see `attachToSession`.
+	 *
+	 * Returns the chosen session id, `null` to disconnect the note, or `undefined` when dismissed.
+	 */
+	async pickSession(noteId: string): Promise<string | null | undefined> {
 		const rows = this.listSessions();
 		const current = this.note(noteId)?.session?.id;
 		const items: (vscode.QuickPickItem & { row?: SessionRow; clears?: boolean })[] = [];
@@ -343,13 +467,9 @@ export class NotesWorkspace implements vscode.Disposable {
 			matchOnDescription: true
 		});
 		if (!chosen) {
-			return;
+			return undefined;
 		}
-		if (chosen.clears) {
-			this.setSession(noteId, null);
-		} else if (chosen.row) {
-			this.bind(noteId, chosen.row.id);
-		}
+		return chosen.clears ? null : chosen.row?.id;
 	}
 
 	dispose(): void {
@@ -370,6 +490,13 @@ export class NotesWorkspace implements vscode.Disposable {
 	}
 
 	// ---------------------------------------------------------------- internals
+
+	/** An editor moving off a note leaves nothing behind when the note held nothing. */
+	private discardIfEmpty(id: string): void {
+		if (this.note(id) && !this.note(id)?.text) {
+			this.deleteNote(id);
+		}
+	}
 
 	private replace(id: string, note: Note): void {
 		this.doc = {
@@ -487,23 +614,6 @@ export class NotesWorkspace implements vscode.Disposable {
 		this.registryWatcher = watcher;
 	}
 
-	/** The cheap half of `refresh`: are the bound sessions running? No transcript is read. */
-	private refreshLiveness(): void {
-		const home = this.claudeHomeSetting();
-		let changed = false;
-		for (const note of this.doc.notes) {
-			const running = note.session ? isSessionRunning(note.session.id, home) : false;
-			const previous = this.resolved.get(note.id);
-			if (previous?.running === running) {
-				continue;
-			}
-			this.resolved.set(note.id, { label: previous?.label, running });
-			changed = true;
-		}
-		if (changed) {
-			this.onChanged.fire({ textChanged: false });
-		}
-	}
 }
 
 /** Running first, then most recent activity, then title. */

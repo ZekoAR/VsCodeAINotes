@@ -44,6 +44,12 @@
         "icon": "$(add)"
       },
       {
+        "command": "ainotes.bindActiveSession",
+        "title": "Bind to Active Claude Session",
+        "category": "AI Notes",
+        "icon": "$(link)"
+      },
+      {
         "command": "ainotes.pickSession",
         "title": "Pick Claude Session",
         "category": "AI Notes",
@@ -77,19 +83,24 @@
       ],
       "editor/title": [
         {
-          "command": "ainotes.pickSession",
+          "command": "ainotes.bindActiveSession",
           "when": "activeWebviewPanelId == ainotes.editor",
           "group": "navigation@1"
         },
         {
-          "command": "ainotes.save",
+          "command": "ainotes.pickSession",
           "when": "activeWebviewPanelId == ainotes.editor",
           "group": "navigation@2"
         },
         {
-          "command": "ainotes.openStoreFile",
+          "command": "ainotes.save",
           "when": "activeWebviewPanelId == ainotes.editor",
           "group": "navigation@3"
+        },
+        {
+          "command": "ainotes.openStoreFile",
+          "when": "activeWebviewPanelId == ainotes.editor",
+          "group": "navigation@4"
         }
       ]
     },

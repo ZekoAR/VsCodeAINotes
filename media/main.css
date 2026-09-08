@@ -58,6 +58,11 @@ body {
 	background: var(--vscode-inputValidation-warningBackground, transparent);
 }
 
+/* Separates the banner's two actions without adding a third thing that looks clickable. */
+.banner-sep {
+	opacity: 0.5;
+}
+
 .link {
 	padding: 0;
 	border: none;

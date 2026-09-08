@@ -30,6 +30,12 @@
 			el.addEventListener('click', openPicker);
 		}
 	}
+	const bindActive = document.getElementById('banner-bind');
+	if (bindActive) {
+		bindActive.addEventListener('click', () => {
+			vscode.postMessage({ type: 'bindActive' });
+		});
+	}
 	pickerBack.addEventListener('click', closePicker);
 	search.addEventListener('input', renderList);
 
@@ -100,7 +106,7 @@
 	/**
 	 * Four states, exactly one on screen:
 	 *   picking     -> the search field and the session list, over everything else;
-	 *   no session  -> the "Select AI Session" button, centred;
+	 *   no session  -> the "Select AI Session" button, centred, and no text field at all;
 	 *   running     -> the notes, with a "Switch AI Session" link in their top-right corner;
 	 *   ended       -> the notes disabled, under a banner carrying the link instead.
 	 */
@@ -121,7 +127,9 @@
 		// Nothing to go back to until a session is already connected.
 		pickerBack.hidden = !connected;
 
-		notes.disabled = ended;
+		// Hiding the editor already puts the text out of reach when nothing is connected; disabling
+		// it says so outright, so a note can never take keystrokes it has no session to file under.
+		notes.disabled = ended || !connected;
 		notes.title = ended ? 'This session is no longer running' : '';
 
 		statusText.textContent = current.dirty
