@@ -48,6 +48,7 @@ body {
 .banner {
 	display: flex;
 	align-items: baseline;
+	flex-wrap: wrap;
 	gap: 6px;
 	flex: 0 0 auto;
 	margin: 8px 8px 0;
@@ -117,6 +118,10 @@ body {
 	position: absolute;
 	top: 1px;
 	right: 1px;
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	max-width: calc(100% - 2px);
 	padding: 4px 8px;
 	border-radius: 0 2px 0 2px;
 	background: var(--vscode-input-background);

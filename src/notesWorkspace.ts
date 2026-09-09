@@ -25,6 +25,14 @@ const POLL_MS = 60_000;
 /** Collapses the burst of events `fs.watch` emits for a single change. */
 const WATCH_DEBOUNCE_MS = 150;
 
+/**
+ * What separates notes carried into a session from the notes already there.
+ *
+ * A horizontal rule on its own line: visible in the panel, meaningful in the dot-file, and not
+ * something a reader has to undo before carrying on typing.
+ */
+const APPEND_SEPARATOR = '\n\n---\n\n';
+
 /** What changed, and which surface already knows about it. */
 export interface NoteChange {
 	/** The note that changed, or `undefined` when the set of notes itself changed. */
@@ -135,6 +143,36 @@ export class NotesWorkspace implements vscode.Disposable {
 	/** The note already filed under a session, if any. */
 	noteIdForSession(sessionId: string): string | undefined {
 		return this.doc.notes.find(note => note.session?.id === sessionId)?.id;
+	}
+
+	/**
+	 * Add text to the end of a session's notes, filing a note under that session if it has none.
+	 *
+	 * Appending never destroys what is already there, which is why it needs no confirmation: the two
+	 * bodies of text end up separated by a rule and both survive. The source note is not touched -
+	 * this copies, so the notes written for one session stay under it.
+	 *
+	 * Returns the note the text landed in, or nothing when the session cannot be written to - it was
+	 * never resolvable, or it stopped running between being listed and being chosen, and a note whose
+	 * session has ended is history rather than a place to file new text.
+	 */
+	appendToSession(sessionId: string, text: string): string | undefined {
+		const target = this.noteForSession(sessionId);
+		if (target.session?.id !== sessionId) {
+			// Nothing in the scan or on disk names that session, so `noteForSession` left the note it
+			// created unbound. Take it back out rather than leaving an orphan in the file.
+			this.deleteNote(target.id);
+			return undefined;
+		}
+		if (!text) {
+			return target.id;
+		}
+		if (this.isReadOnly(target.id)) {
+			return undefined;
+		}
+		const existing = target.text.replace(/\s+$/, '');
+		this.setText(target.id, existing ? `${existing}${APPEND_SEPARATOR}${text}` : text);
+		return target.id;
 	}
 
 	/** Drop a note from the file. */

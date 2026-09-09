@@ -15,7 +15,9 @@ type InboundMessage =
 	| { type: 'save' }
 	| { type: 'requestSessions' }
 	| { type: 'bindActive' }
-	| { type: 'selectSession'; sessionId: string };
+	// `carry` is what separates "Continue in Session" from "Switch AI Session": the same pick, with
+	// this editor's text copied into the session that was chosen.
+	| { type: 'selectSession'; sessionId: string; carry?: boolean };
 
 /** The rendered webview of one note editor, wired to its note. */
 class NotesSurface {
@@ -26,7 +28,7 @@ class NotesSurface {
 		extensionUri: vscode.Uri,
 		private readonly workspace: NotesWorkspace,
 		private noteId: string,
-		private readonly onSelectSession: (sessionId: string) => void,
+		private readonly onSelectSession: (sessionId: string, carry: boolean) => void,
 		private readonly onBindActive: () => void
 	) {
 		webview.options = {
@@ -99,7 +101,7 @@ class NotesSurface {
 				this.onBindActive();
 				return;
 			case 'selectSession':
-				this.onSelectSession(message.sessionId);
+				this.onSelectSession(message.sessionId, message.carry === true);
 				return;
 		}
 	}
@@ -210,7 +212,13 @@ export class NotesEditorPanel {
 			extensionUri,
 			workspace,
 			noteId,
-			sessionId => this.attach(sessionId),
+			(sessionId, carry) => {
+				if (carry) {
+					this.continueIn(sessionId);
+				} else {
+					this.attach(sessionId);
+				}
+			},
 			() => this.bindActive()
 		);
 		this.updateTitle();
@@ -268,6 +276,36 @@ export class NotesEditorPanel {
 	disconnect(): void {
 		this.workspace.setSession(this.noteId, null);
 		this.retarget(this.noteId);
+	}
+
+	/**
+	 * Carry these notes into another session and follow them there.
+	 *
+	 * The text is COPIED, so the session it came from keeps its own notes, and it is appended to
+	 * whatever the target session already had rather than replacing it. The move afterwards is the
+	 * ordinary switch, so the same one-tab-per-note rule applies.
+	 */
+	continueIn(sessionId: string): void {
+		const source = this.workspace.note(this.noteId);
+		if (!source || source.session?.id === sessionId) {
+			// Continuing into the session already on screen would append the notes to themselves.
+			return;
+		}
+		const target = this.workspace.appendToSession(sessionId, source.text);
+		if (!target) {
+			void vscode.window.showInformationMessage(
+				'AI Notes: could not continue in that session - it is not running any more.'
+			);
+			return;
+		}
+		const label = this.workspace.labelFor(target) ?? 'that session';
+		if (this.attach(sessionId)) {
+			vscode.window.setStatusBarMessage(`AI Notes: notes continued in ${label}`, 5000);
+			return;
+		}
+		void vscode.window.showInformationMessage(
+			`AI Notes: notes copied into ${label}, whose own tab was already open and has been revealed.`
+		);
 	}
 
 	/** Ask which session these notes belong to, and move this editor onto the answer. */
@@ -411,11 +449,17 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   <span>The connected AI session is not running.</span>
   <button id="banner-bind" class="link" type="button">Reconnect to Active</button>
   <span class="banner-sep">&#183;</span>
+  <button id="banner-continue" class="link" type="button">Continue in Session</button>
+  <span class="banner-sep">&#183;</span>
   <button id="banner-switch" class="link" type="button">Switch AI Session</button>
 </div>
 <div id="editor" class="editor" hidden>
   <textarea id="notes" class="notes" spellcheck="false" placeholder="Notes for this session&#10;&#10;Saved to the workspace dot-file as you type."></textarea>
-  <button id="switch" class="link switch" type="button">Switch AI Session</button>
+  <div id="actions" class="switch">
+    <button id="continue" class="link" type="button" title="Copy these notes into another session and continue there">Continue in Session</button>
+    <span class="banner-sep">&#183;</span>
+    <button id="switch" class="link" type="button" title="Show another session's notes">Switch AI Session</button>
+  </div>
 </div>
 <div id="picker" class="picker" hidden>
   <div class="picker-bar">

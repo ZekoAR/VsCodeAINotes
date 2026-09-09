@@ -9,7 +9,7 @@
 	const banner = /** @type {HTMLElement} */ (document.getElementById('banner'));
 	const editor = /** @type {HTMLElement} */ (document.getElementById('editor'));
 	const status = /** @type {HTMLElement} */ (document.getElementById('status'));
-	const switchLink = /** @type {HTMLButtonElement} */ (document.getElementById('switch'));
+	const actions = /** @type {HTMLElement} */ (document.getElementById('actions'));
 	const statusText = /** @type {HTMLElement} */ (document.getElementById('status-text'));
 	const fileName = /** @type {HTMLElement} */ (document.getElementById('file-name'));
 	const picker = /** @type {HTMLElement} */ (document.getElementById('picker'));
@@ -19,6 +19,12 @@
 
 	/** Whether the panel is showing its session list. Owned here: the host does not know about it. */
 	let picking = false;
+	/**
+	 * What picking a row will do: 'switch' shows that session's notes instead of these, 'continue'
+	 * copies these notes into it first and follows them there. The list is the same list; only this
+	 * and the placeholder differ, so there is one picker rather than two that drift apart.
+	 */
+	let pickerMode = 'switch';
 	/** @type {any} The last state the host sent. */
 	let current = null;
 	/** @type {Array<{id: string, label: string, live: boolean, lastActivity?: number, pid?: number}>} */
@@ -27,7 +33,13 @@
 	for (const id of ['select', 'switch', 'banner-switch']) {
 		const el = document.getElementById(id);
 		if (el) {
-			el.addEventListener('click', openPicker);
+			el.addEventListener('click', () => openPicker('switch'));
+		}
+	}
+	for (const id of ['continue', 'banner-continue']) {
+		const el = document.getElementById(id);
+		if (el) {
+			el.addEventListener('click', () => openPicker('continue'));
 		}
 	}
 	const bindActive = document.getElementById('banner-bind');
@@ -82,9 +94,12 @@
 		}
 	});
 
-	function openPicker() {
+	/** @param {string} mode 'switch' or 'continue' */
+	function openPicker(mode) {
 		picking = true;
+		pickerMode = mode;
 		search.value = '';
+		search.placeholder = mode === 'continue' ? 'Continue in Session' : 'Select AI Session';
 		list.replaceChildren();
 		vscode.postMessage({ type: 'requestSessions' });
 		apply();
@@ -98,8 +113,9 @@
 
 	/** @param {string} id */
 	function select(id) {
+		const carry = pickerMode === 'continue';
 		picking = false;
-		vscode.postMessage({ type: 'selectSession', sessionId: id });
+		vscode.postMessage({ type: 'selectSession', sessionId: id, carry: carry });
 		apply();
 	}
 
@@ -107,8 +123,8 @@
 	 * Four states, exactly one on screen:
 	 *   picking     -> the search field and the session list, over everything else;
 	 *   no session  -> the "Select AI Session" button, centred, and no text field at all;
-	 *   running     -> the notes, with a "Switch AI Session" link in their top-right corner;
-	 *   ended       -> the notes disabled, under a banner carrying the link instead.
+	 *   running     -> the notes, with "Continue in Session" and "Switch AI Session" in the corner;
+	 *   ended       -> the notes disabled, under a banner carrying those actions instead.
 	 */
 	function apply() {
 		if (!current) {
@@ -122,8 +138,8 @@
 		editor.hidden = picking || !connected;
 		status.hidden = picking || !connected;
 		banner.hidden = picking || !ended;
-		// One way in is enough: while the banner is up it carries the link.
-		switchLink.hidden = ended;
+		// One way in is enough: while the banner is up it carries the links.
+		actions.hidden = ended;
 		// Nothing to go back to until a session is already connected.
 		pickerBack.hidden = !connected;
 
@@ -160,14 +176,19 @@
 	function renderList() {
 		const query = search.value.trim().toLowerCase();
 		const bound = current && current.session ? current.session.id : null;
-		const rows = sessions
+		// Notes cannot be filed under a session that has ended, and "continue in" means somewhere
+		// work carries on, so that mode offers running sessions only.
+		const offered = pickerMode === 'continue' ? sessions.filter(s => s.live) : sessions;
+		const rows = offered
 			.filter(s => !query || s.label.toLowerCase().indexOf(query) >= 0 || s.id.indexOf(query) >= 0)
 			.map(s => makeRow(s, s.id === bound));
 		if (rows.length === 0) {
 			const none = document.createElement('div');
 			none.className = 'row-none';
-			none.textContent = sessions.length === 0
-				? 'No Claude sessions found for this folder'
+			none.textContent = offered.length === 0
+				? pickerMode === 'continue'
+					? 'No running Claude sessions to continue in'
+					: 'No Claude sessions found for this folder'
 				: 'No session matches "' + search.value.trim() + '"';
 			list.replaceChildren(none);
 			return;

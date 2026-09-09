@@ -11,10 +11,11 @@ dot-file in the workspace.
   else, so a view could never go there. The tab is captioned `Notes: <session title>` once a
   session is connected, and `AI Notes` before that.
 - **The panel has four states.** Not connected: a single centred **Select AI Session** button.
-  Connected: the notes, with a small **Switch AI Session** link in the textarea's top-right corner.
-  Connected but the session has ended: the notes disabled under a banner reading *The connected AI
-  session is not running.* with the same link. Picking: a search field and a scrollable list that
-  take over the whole panel.
+  Connected: the notes, with **Continue in Session** and **Switch AI Session** links in the
+  textarea's top-right corner. Connected but the session has ended: the notes disabled under a
+  banner reading *The connected AI session is not running.* carrying those links and
+  **Reconnect to Active**. Picking: a search field and a scrollable list that take over the whole
+  panel.
 - **The session list lives in the panel**, not in the quick-pick dropdown at the top of the window.
   Each row shows the session's title, its age, the first eight characters of its id and its pid.
   Running sessions come first, most recently active at the top, ties broken alphabetically by
@@ -92,6 +93,21 @@ disconnected keeps its text parked in the file and gets it back when it is conne
 A note left behind with nothing in it is dropped rather than kept as an empty row in the file. If the
 target session's notes are already open in another tab, that tab is revealed instead - two tabs on
 one note would fight over its text.
+
+### Continuing in another session
+
+**Switch AI Session** moves the editor onto another session's notes and leaves the text where it
+was. **Continue in Session** takes the text with you: the notes on screen are copied into the
+session you pick, and the editor follows them there.
+
+The copy is **appended**, under a `---` rule on its own line, so notes the target session already
+had are never overwritten and the two bodies stay legible. The session you came from keeps its own
+copy - this carries notes forward, it does not move them out.
+
+That mode lists **running sessions only**. A note whose session has ended is history and cannot take
+new text, so offering one would silently drop what you carried. It is also the reason the action sits
+in the ended-session banner: carrying your notes into the session that replaced this one is exactly
+what you want when the old one stops.
 
 ### After a window reload
 
