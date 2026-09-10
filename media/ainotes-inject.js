@@ -245,6 +245,9 @@
 			const tab = label.closest('.tab');
 			if (tab) {
 				pressElement(tab);
+				// Measured after the press, and on the element that exists then: activating a tab
+				// makes VS Code restyle and can move it, so a rectangle taken beforehand may be the
+				// wrong one by the time the overlay is drawn.
 				flashElement(tab);
 				console.log(`${TAG} focused tab`, caption);
 				return;
@@ -310,26 +313,46 @@
 	}
 
 	/**
-	 * Blink the tab so the eye can find it.
+	 * Blink over the tab so the eye can find it.
 	 *
-	 * Focusing a tab in a crowded tab bar is invisible if the tab was already partly in view, so the
-	 * click gets an acknowledgement. The inline animation is cleared afterwards: the element belongs
-	 * to VS Code, and leaving our style on it would outlive the reason for it.
+	 * Focusing a tab in a crowded bar is invisible if it was already partly in view, so the click
+	 * gets an acknowledgement.
+	 *
+	 * Drawn as a separate overlay rather than by animating the tab, because animating the tab does
+	 * not work: VS Code's stylesheet carries
+	 * `.tabs-container>.tab { background-color: transparent !important }` for the modern-ui tabs this
+	 * workbench uses, and a CSS animation loses to `!important`. `box-shadow` is `!important` in the
+	 * same rule, so there is nothing left on the tab worth animating. An element of our own has no
+	 * competing declaration, and is positioned over the tab's rectangle instead.
+	 *
+	 * `position: fixed` against the measured rect, so it needs nothing of the tab's own positioning
+	 * context, and `pointer-events: none` so it cannot intercept anything during its 600ms.
 	 */
 	function flashElement(el) {
 		ensureFlashStyle();
-		el.style.animation = 'none';
-		// Reading a layout property forces the restart, or a second flash on the same tab does
-		// nothing because the animation name has not changed.
-		void el.offsetWidth;
-		el.style.animation = 'ainotes-flash 200ms ease-in-out 3';
-		el.addEventListener(
-			'animationend',
-			() => {
-				el.style.animation = '';
-			},
-			{ once: true }
-		);
+		const box = el.getBoundingClientRect();
+		if (!box.width || !box.height) {
+			return;
+		}
+		const flash = document.createElement('div');
+		flash.className = 'ainotes-flash';
+		flash.style.cssText = [
+			'position:fixed',
+			`top:${Math.round(box.top)}px`,
+			`left:${Math.round(box.left)}px`,
+			`width:${Math.round(box.width)}px`,
+			`height:${Math.round(box.height)}px`,
+			'border-radius:4px',
+			'pointer-events:none',
+			'z-index:1000',
+			'animation:ainotes-flash 200ms ease-in-out 3'
+		].join(';');
+		document.body.appendChild(flash);
+		const done = () => flash.remove();
+		flash.addEventListener('animationend', done, { once: true });
+		// A flash left on screen would be worse than no flash, so its removal does not depend on an
+		// event firing.
+		setTimeout(done, 1200);
 	}
 
 	function panelFor(id) {

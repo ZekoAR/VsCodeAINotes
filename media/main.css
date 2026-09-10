@@ -101,7 +101,7 @@ body {
 
 /* One open Claude tab. */
 .row {
-	margin-bottom: 2px;
+	margin-bottom: 4px;
 	padding: 5px 9px;
 	border-left: 2px solid transparent;
 	cursor: pointer;

@@ -247,10 +247,12 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 					this.postInjectState();
 					return;
 				case 'spikePatch':
-					this.runSpike('Patching workbench.html', SPIKE_PATCH_SCRIPT);
+					this.runSpike('Patching workbench.html', SPIKE_PATCH_SCRIPT, () => this.afterSpike());
 					return;
 				case 'spikeUnpatch':
-					this.runSpike('Removing the workbench.html injection', SPIKE_UNPATCH_SCRIPT);
+					this.runSpike('Removing the workbench.html injection', SPIKE_UNPATCH_SCRIPT, () =>
+						this.afterSpike()
+					);
 					return;
 				case 'injectedRegister':
 					// A stale panel is offered the update instead of a note, so the version gate
@@ -490,6 +492,20 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 		} catch {
 			return undefined;
 		}
+	}
+
+	/**
+	 * The menu has done what it was opened for, so it closes.
+	 *
+	 * The install state is re-read at the same time, because the button just changed it: without
+	 * this the panel would go on claiming the workbench is patched after an un-patch, and only
+	 * notice on the next reload. Reached from `runSpike`'s completion, which fires only when the
+	 * script exited cleanly - a failure leaves the menu open to retry, with the reason in the
+	 * output channel that was already brought to the front.
+	 */
+	private afterSpike(): void {
+		void this.view?.webview.postMessage({ type: 'spikeDone' });
+		this.postInjectState();
 	}
 
 	/** Tell the panel whether this window's workbench carries the injection at all. */

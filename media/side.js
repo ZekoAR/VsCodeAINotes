@@ -26,15 +26,16 @@
 
 	// The menu is the only thing that reveals the patch actions now, so they start hidden and no
 	// longer depend on whether a payload has reported a revision.
-	menuButton.addEventListener('click', () => {
-		const open = devTools.hasAttribute('hidden');
+	function setMenuOpen(open) {
 		if (open) {
 			devTools.removeAttribute('hidden');
 		} else {
 			devTools.setAttribute('hidden', '');
 		}
 		menuButton.setAttribute('aria-expanded', String(open));
-	});
+	}
+
+	menuButton.addEventListener('click', () => setMenuOpen(devTools.hasAttribute('hidden')));
 
 	/** Matches the extension's own autosave delay, so both surfaces settle at the same pace. */
 	const GENERAL_SAVE_MS = 800;
@@ -184,6 +185,12 @@
 				problem: message.problem,
 				at: message.at
 			});
+			return;
+		}
+		if (message && message.type === 'spikeDone') {
+			// Whatever was opened for has happened, and the result is in the output channel rather
+			// than in this menu.
+			setMenuOpen(false);
 			return;
 		}
 		if (message && message.type === 'injectState') {
