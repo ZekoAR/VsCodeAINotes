@@ -46,6 +46,8 @@
 	let generalSaveTimer;
 	/** Set while a push writes into the field, so arriving text is not mistaken for an edit. */
 	let generalLoading = false;
+	/** The text last handed to the extension. The field is modified when it differs from this. */
+	let generalLastSent = null;
 
 	/** One place that writes the height, so the flex basis and the inline height cannot disagree. */
 	function setGeneralHeight(height) {
@@ -85,10 +87,12 @@
 		}
 		markGeneral();
 		clearTimeout(generalSaveTimer);
-		generalSaveTimer = setTimeout(
-			() => vscode.postMessage({ type: 'generalSave', text: generalText.value }),
-			GENERAL_SAVE_MS
-		);
+		// Fire and forget: nothing is expected back, so nothing can arrive later and overwrite what
+		// has been typed since.
+		generalSaveTimer = setTimeout(() => {
+			generalLastSent = generalText.value;
+			vscode.postMessage({ type: 'generalSave', text: generalLastSent });
+		}, GENERAL_SAVE_MS);
 	});
 
 	// Pointer capture, so the drag survives the cursor leaving a 4px strip; committed once on
@@ -169,20 +173,10 @@
 			showInjectBanner(message);
 			return;
 		}
-		if (
-			message &&
-			(message.type === 'injectedNotes' ||
-				message.type === 'injectedError' ||
-				message.type === 'injectedSaved')
-		) {
+		if (message && (message.type === 'injectedNotes' || message.type === 'injectedError')) {
 			console.log('[AI Notes] side <- extension', message);
 			toInjected({
-				kind:
-					message.type === 'injectedNotes'
-						? 'notes'
-						: message.type === 'injectedSaved'
-							? 'saved'
-							: 'error',
+				kind: message.type === 'injectedNotes' ? 'notes' : 'error',
 				panel: message.panel,
 				sessionId: message.sessionId,
 				agent: message.agent,
@@ -231,11 +225,17 @@
 			}
 			generalToggle.removeAttribute('hidden');
 			setGeneralHeight(message.height || GENERAL_DEFAULT);
-			// Never overwrite what is being typed: this arrives on an outside edit too.
-			if (message.text !== generalText.value) {
+			// Applied only when the field is not locally modified. Modified means it differs from
+			// what was last sent, which includes text typed while a save was being written - the case
+			// that used to be overwritten a moment after saving.
+			const modified = generalLastSent !== null && generalText.value !== generalLastSent;
+			if (!modified && message.text !== generalText.value) {
 				generalLoading = true;
 				generalText.value = message.text || '';
 				generalLoading = false;
+				generalLastSent = generalText.value;
+			} else if (generalLastSent === null) {
+				generalLastSent = generalText.value;
 			}
 			markGeneral();
 			applyGeneralOpen(Boolean(message.open));

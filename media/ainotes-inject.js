@@ -669,10 +669,6 @@
 			});
 			return;
 		}
-		if (data.kind === 'saved') {
-			toFrame(entry, { kind: 'saved', at: data.at });
-			return;
-		}
 		if (data.kind === 'error') {
 			// Stays unconnected on purpose, so the sweep keeps announcing it. A session that is not
 			// resolvable yet - a tab just reopened, a session still starting - becomes resolvable

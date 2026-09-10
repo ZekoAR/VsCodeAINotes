@@ -162,8 +162,15 @@
 			let saveTimer;
 			/** Set while a push writes into the textarea, so arriving text is not itself an edit. */
 			let loading = false;
-			/** Set from the first keystroke until the save goes out, so a push cannot eat an edit. */
-			let dirty = false;
+			/**
+			 * The text last handed to the host, or null before anything has arrived.
+			 *
+			 * The field is locally modified exactly when its value differs from this - which stays
+			 * true for anything typed while a save was in flight. The flag this replaces was cleared
+			 * by the save's acknowledgement, which declared the field settled while newer keystrokes
+			 * were sitting in it, and the next push then overwrote them.
+			 */
+			let lastSent = null;
 
 			function status(text, kind) {
 				els.status.textContent = text;
@@ -182,15 +189,13 @@
 				if (loading) {
 					return;
 				}
-				dirty = true;
-				status('typing...');
+				status('');
 				clearTimeout(saveTimer);
 				saveTimer = setTimeout(() => {
-					// `dirty` stays set until the save is acknowledged, not merely dispatched. It is
-					// what stops an incoming push overwriting text that is not on disk yet, and a
-					// save can fail after being sent - the side panel may be gone.
-					status('saving...');
-					ask('save', els.text.value);
+					// Fire and forget. Nothing comes back on success, so nothing can arrive and
+					// declare the field settled while it is still being typed into.
+					lastSent = els.text.value;
+					ask('save', lastSent);
 				}, SAVE_DELAY_MS);
 			});
 
@@ -260,42 +265,37 @@
 					// there is no deadline to miss and nothing to retry - a note that arrives late,
 					// or again because it changed elsewhere, is handled by the same path.
 					const incoming = data.text || '';
-					// Never overwrite what is being typed. A push that agrees with the box is a
-					// no-op, and one that disagrees while the reader is mid-edit would eat keystrokes.
-					if (incoming !== els.text.value && !dirty) {
+					// Locally modified means the field differs from what was last sent. Anything
+					// arriving then is older than what is on screen, so it is dropped rather than
+					// applied - this is the guard that stops a push eating keystrokes.
+					const modified = lastSent !== null && els.text.value !== lastSent;
+					if (!modified && incoming !== els.text.value) {
 						loading = true;
 						els.text.value = incoming;
 						loading = false;
+						lastSent = incoming;
+					} else if (lastSent === null) {
+						lastSent = els.text.value;
 					}
 					els.text.disabled = false;
 					// The messaging address, not the session uuid: this is the name Claude quotes when
 					// asked how to reach it, so it is the one worth being able to read off the panel.
 					// It exists only while the process does, hence the fallback rather than a stale one.
 					els.session.textContent = data.agent || 'not running';
-					if (dirty) {
-						// Reconnected with text that never made it to disk - send it again now rather
-						// than leaving the reader to nudge a key to trigger a save.
-						status('reconnected, saving...');
-						ask('save', els.text.value);
-					} else {
-						status(incoming ? 'loaded' : 'empty');
+					if (modified) {
+						// Reconnected holding text the host has not seen. Sent again, still without
+						// waiting for anything back.
+						lastSent = els.text.value;
+						ask('save', lastSent);
 					}
 					return;
 				}
-				if (data.kind === 'saved') {
-					// An explicit acknowledgement rather than assuming: showing "saved" the moment a
-					// message is dispatched would claim something nobody had confirmed. This is also
-					// the only thing that clears `dirty`, so unsaved text is never overwritten.
-					dirty = false;
-					status('saved ' + new Date(data.at || Date.now()).toLocaleTimeString());
-					return;
-				}
 				if (data.kind === 'error') {
-					// Only locked when there is nothing at risk. Text typed but not yet saved stays
-					// editable: it survives here, `dirty` protects it from being overwritten, and it
-					// is re-sent the moment the panel reconnects. Disabling mid-sentence would strand
-					// the reader for a condition that recovers on its own.
-					els.text.disabled = !dirty;
+					// Only locked when there is nothing at risk. Text typed but not yet accepted stays
+					// editable: it survives here, the `lastSent` comparison protects it from being
+					// overwritten, and it is re-sent when the panel reconnects. Disabling mid-sentence
+					// would strand the reader for a condition that recovers on its own.
+					els.text.disabled = lastSent !== null && els.text.value === lastSent;
 					els.session.textContent = 'not connected';
 					// Not final: the host keeps announcing this panel, so a session that becomes
 					// resolvable later arrives as a `notes` event with nothing pressed here.

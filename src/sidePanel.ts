@@ -214,9 +214,11 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 			this.disposables.push(
 				this.workspace.onDidChange(change => {
 					this.postRows();
-					// Skipped when this panel is what caused it: the textarea already holds the text,
-					// and pushing it back would fight whatever has been typed since.
-					if (change.origin !== this) {
+					// Only a real edit from somewhere else. Both halves of this matter: `saveNow`
+					// fires `textChanged: false` with NO origin once a debounced write lands, and
+					// treating that as news pushed the file's text back over whatever had been typed
+					// while it was being written - the field overwriting itself a moment after a save.
+					if (change.textChanged && change.origin !== this) {
 						this.postGeneral();
 					}
 					this.pushChange(change);
@@ -647,8 +649,10 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 		// panel that typed it - it already shows the text.
 		this.workspace.setText(note.id, text, panel);
 		this.registered.set(panel, { sessionId, noteId: note.id, pushed: text });
+		// Deliberately no acknowledgement. A reply here invited the panel to act on it, and acting on
+		// it meant treating the field as settled - which it is not, because more may have been typed
+		// while the write was in flight. Failures still travel; success is silence.
 		this.trace(`save ${panel} session=${sessionId.slice(0, 8)} ${text.length} chars`);
-		void this.view?.webview.postMessage({ type: 'injectedSaved', panel, at: Date.now() });
 	}
 
 	/**
