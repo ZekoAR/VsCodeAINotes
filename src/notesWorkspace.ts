@@ -6,9 +6,9 @@ import {
 	claudeHome,
 	isSessionRunning,
 	lookupSessionLabel,
+	liveSessionName,
 	scanSessions,
-	sessionLabel,
-	truncate
+	sessionLabel
 } from './sessions';
 import { BoundSession, Note, NotesDoc, NotesStore, newNote } from './store';
 
@@ -24,14 +24,6 @@ const POLL_MS = 60_000;
 
 /** Collapses the burst of events `fs.watch` emits for a single change. */
 const WATCH_DEBOUNCE_MS = 150;
-
-/**
- * What separates notes carried into a session from the notes already there.
- *
- * A horizontal rule on its own line: visible in the panel, meaningful in the dot-file, and not
- * something a reader has to undo before carrying on typing.
- */
-const APPEND_SEPARATOR = '\n\n---\n\n';
 
 /** What changed, and which surface already knows about it. */
 export interface NoteChange {
@@ -50,12 +42,6 @@ export interface SessionRow {
 	live: boolean;
 	lastActivity?: number;
 	pid?: number;
-}
-
-/** One row in the side panel: a session you can open a note editor for. */
-export interface SideRow extends SessionRow {
-	/** True when a note for this session already exists, so opening reveals rather than creates. */
-	hasNote: boolean;
 }
 
 /**
@@ -109,22 +95,8 @@ export class NotesWorkspace implements vscode.Disposable {
 		return this.dirty;
 	}
 
-	notes(): Note[] {
-		return this.doc.notes;
-	}
-
 	note(id: string): Note | undefined {
 		return this.doc.notes.find(candidate => candidate.id === id);
-	}
-
-	/** A new note, bound to nothing. The editor that opens it picks its session. */
-	createNote(): Note {
-		const note = newNote();
-		this.doc = { ...this.doc, notes: [...this.doc.notes, note] };
-		this.dirty = true;
-		this.saveNow();
-		this.onChanged.fire({ textChanged: false });
-		return note;
 	}
 
 	/** The note for a session, creating and binding one if it has none yet. */
@@ -145,46 +117,26 @@ export class NotesWorkspace implements vscode.Disposable {
 		return this.doc.notes.find(note => note.session?.id === sessionId)?.id;
 	}
 
-	/**
-	 * Add text to the end of a session's notes, filing a note under that session if it has none.
-	 *
-	 * Appending never destroys what is already there, which is why it needs no confirmation: the two
-	 * bodies of text end up separated by a rule and both survive. The source note is not touched -
-	 * this copies, so the notes written for one session stay under it.
-	 *
-	 * Returns the note the text landed in, or nothing when the session cannot be written to - it was
-	 * never resolvable, or it stopped running between being listed and being chosen, and a note whose
-	 * session has ended is history rather than a place to file new text.
-	 */
-	appendToSession(sessionId: string, text: string): string | undefined {
-		const target = this.noteForSession(sessionId);
-		if (target.session?.id !== sessionId) {
-			// Nothing in the scan or on disk names that session, so `noteForSession` left the note it
-			// created unbound. Take it back out rather than leaving an orphan in the file.
-			this.deleteNote(target.id);
-			return undefined;
-		}
-		if (!text) {
-			return target.id;
-		}
-		if (this.isReadOnly(target.id)) {
-			return undefined;
-		}
-		const existing = target.text.replace(/\s+$/, '');
-		this.setText(target.id, existing ? `${existing}${APPEND_SEPARATOR}${text}` : text);
-		return target.id;
+	/** The folder's own note, belonging to no session. */
+	generalText(): string {
+		return this.doc.general ?? '';
 	}
 
-	/** Drop a note from the file. */
-	deleteNote(id: string): void {
-		if (!this.doc.notes.some(note => note.id === id)) {
+	/**
+	 * Write the folder's note.
+	 *
+	 * Goes through the same debounced save and the same change event as a session note, so an
+	 * external edit to the file and an edit here cannot overwrite each other, and the panel showing
+	 * it repaints. `origin` keeps the surface that typed it from being told its own news.
+	 */
+	setGeneralText(text: string, origin?: unknown): void {
+		if ((this.doc.general ?? '') === text) {
 			return;
 		}
-		this.doc = { ...this.doc, notes: this.doc.notes.filter(note => note.id !== id) };
-		this.resolved.delete(id);
+		this.doc = { ...this.doc, general: text };
 		this.dirty = true;
-		this.saveNow();
-		this.onChanged.fire({ textChanged: false });
+		this.scheduleSave();
+		this.onChanged.fire({ textChanged: true, origin });
 	}
 
 	setText(id: string, text: string, origin?: unknown): void {
@@ -236,23 +188,6 @@ export class NotesWorkspace implements vscode.Disposable {
 			return;
 		}
 		this.onChanged.fire({ textChanged: false });
-	}
-
-	/**
-	 * What to call a note's session on screen: the session's own title, else the first thing that
-	 * was asked of it, else its short id. The pretty name in the live registry (`zod-ea`) is
-	 * deliberately not used - it belongs to a process, so it changes when Claude restarts under the
-	 * same session id and does not exist at all once the session has exited.
-	 */
-	labelFor(id: string): string | undefined {
-		const note = this.note(id);
-		if (!note?.session) {
-			return undefined;
-		}
-		const label = this.resolved.get(id)?.label;
-		// Generous: real titles run to ~52 characters, and VS Code shortens a tab caption itself.
-		// The cap only guards against a first-prompt fallback running away.
-		return label ? truncate(label, 80) : note.session.id.slice(0, 8);
 	}
 
 	/**
@@ -346,55 +281,20 @@ export class NotesWorkspace implements vscode.Disposable {
 	 * Claude tab is often still captioned "Claude Code", before its session has been titled. Two
 	 * running sessions is a genuine tie and resolves to nothing.
 	 */
+	/**
+	 * The messaging address of a running session, or nothing when it is not running.
+	 *
+	 * Looked up fresh every time. The name is per process, so a remembered one is a name for a
+	 * process that has gone - see `liveSessionName`.
+	 */
+	liveNameFor(sessionId: string): string | undefined {
+		return liveSessionName(sessionId, this.claudeHomeSetting());
+	}
+
 	soleLiveSessionId(): string | undefined {
 		this.scanned = this.scan();
 		const live = this.scanned.filter(session => session.live);
 		return live.length === 1 ? live[0].sessionId : undefined;
-	}
-
-	/**
-	 * The side panel's rows: every running session, plus any session that already has a note but is
-	 * no longer running. Without that second group, closing such a note's tab would strand it in the
-	 * file with no way back to it.
-	 */
-	sidePanelRows(): SideRow[] {
-		this.scanned = this.scan();
-		const noted = new Set(
-			this.doc.notes.map(note => note.session?.id).filter((id): id is string => Boolean(id))
-		);
-		const rows: SideRow[] = [];
-		const seen = new Set<string>();
-		for (const session of this.scanned) {
-			if (!session.live && !noted.has(session.sessionId)) {
-				continue;
-			}
-			seen.add(session.sessionId);
-			rows.push({
-				id: session.sessionId,
-				label: sessionLabel(session),
-				live: session.live,
-				lastActivity: session.lastActivity ?? session.startedAt,
-				pid: session.pid,
-				hasNote: noted.has(session.sessionId)
-			});
-		}
-		// A note whose session is older than the history limit is not in the scan at all, and it
-		// still has to be reachable.
-		for (const note of this.doc.notes) {
-			const session = note.session;
-			if (!session || seen.has(session.id)) {
-				continue;
-			}
-			rows.push({
-				id: session.id,
-				label: this.labelFor(note.id) ?? session.id.slice(0, 8),
-				live: false,
-				lastActivity: undefined,
-				pid: session.pid,
-				hasNote: true
-			});
-		}
-		return sortRows(rows);
 	}
 
 	/** Bind a note to a session. False when this workspace can resolve no such session. */
@@ -420,96 +320,6 @@ export class NotesWorkspace implements vscode.Disposable {
 		return true;
 	}
 
-	/**
-	 * Move an editor onto the session it should now show, and answer which note it lands on.
-	 *
-	 * A note belongs to a session, so switching an editor's session is NOT a rename of the note on
-	 * screen: the note being left keeps its own text under its own session, and the editor lands on
-	 * the target session's note - the existing one, or a fresh empty one. Without this, switching
-	 * re-filed one session's notes under another and the first session was left with none.
-	 *
-	 * The one exception is a note connected to nothing, which has no session to leave anything behind
-	 * in and is filed under the target in place. A new note is always empty when that happens - an
-	 * editor connected to nothing shows no text field - and a note parked by disconnecting gets its
-	 * text back when it is filed again.
-	 *
-	 * A note left behind holding nothing is dropped rather than kept as an empty row in the file.
-	 */
-	attachToSession(noteId: string, sessionId: string): string {
-		const note = this.note(noteId);
-		if (!note || note.session?.id === sessionId) {
-			return noteId;
-		}
-		const existing = this.doc.notes.find(
-			candidate => candidate.id !== noteId && candidate.session?.id === sessionId
-		);
-		if (existing) {
-			this.discardIfEmpty(noteId);
-			return existing.id;
-		}
-		if (!note.session) {
-			this.bind(noteId, sessionId);
-			return noteId;
-		}
-		const fresh = newNote();
-		this.doc = { ...this.doc, notes: [...this.doc.notes, fresh] };
-		this.dirty = true;
-		if (!this.bind(fresh.id, sessionId)) {
-			// Neither the scan nor the file names that session, so there is nowhere to move to.
-			this.doc = { ...this.doc, notes: this.doc.notes.filter(entry => entry.id !== fresh.id) };
-			return noteId;
-		}
-		this.discardIfEmpty(noteId);
-		return fresh.id;
-	}
-
-	/**
-	 * The quick-pick session picker, for entry points with no panel open to draw a list in.
-	 *
-	 * It only ASKS. Applying the answer is the caller's, because moving an editor onto another
-	 * session's notes is more than a field change on this note - see `attachToSession`.
-	 *
-	 * Returns the chosen session id, `null` to disconnect the note, or `undefined` when dismissed.
-	 */
-	async pickSession(noteId: string): Promise<string | null | undefined> {
-		const rows = this.listSessions();
-		const current = this.note(noteId)?.session?.id;
-		const items: (vscode.QuickPickItem & { row?: SessionRow; clears?: boolean })[] = [];
-		const live = rows.filter(row => row.live);
-		const past = rows.filter(row => !row.live);
-		const toItem = (row: SessionRow) => ({
-			label: `${row.live ? '$(pulse) ' : '$(history) '}${row.label}`,
-			description: [
-				row.id.slice(0, 8),
-				row.pid ? `pid ${row.pid}` : '',
-				row.id === current ? 'connected' : ''
-			]
-				.filter(Boolean)
-				.join(' · '),
-			row
-		});
-		if (live.length) {
-			items.push({ label: 'Running now', kind: vscode.QuickPickItemKind.Separator });
-			items.push(...live.map(toItem));
-		}
-		if (past.length) {
-			items.push({ label: 'Earlier in this folder', kind: vscode.QuickPickItemKind.Separator });
-			items.push(...past.map(toItem));
-		}
-		items.push({ label: '', kind: vscode.QuickPickItemKind.Separator });
-		items.push({ label: '$(circle-slash) Not connected to a session', clears: true, alwaysShow: true });
-
-		const chosen = await vscode.window.showQuickPick(items, {
-			title: 'AI Notes - which Claude session do these notes belong to?',
-			placeHolder: 'Pick a session',
-			matchOnDescription: true
-		});
-		if (!chosen) {
-			return undefined;
-		}
-		return chosen.clears ? null : chosen.row?.id;
-	}
-
 	dispose(): void {
 		if (this.dirty) {
 			this.saveNow();
@@ -528,13 +338,6 @@ export class NotesWorkspace implements vscode.Disposable {
 	}
 
 	// ---------------------------------------------------------------- internals
-
-	/** An editor moving off a note leaves nothing behind when the note held nothing. */
-	private discardIfEmpty(id: string): void {
-		if (this.note(id) && !this.note(id)?.text) {
-			this.deleteNote(id);
-		}
-	}
 
 	private replace(id: string, note: Note): void {
 		this.doc = {

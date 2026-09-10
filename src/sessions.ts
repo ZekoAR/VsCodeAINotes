@@ -180,6 +180,24 @@ export function isSessionRunning(sessionId: string, claudeHomeOverride?: string)
 }
 
 /**
+ * The name a running session answers to for cross-session messaging - `ainotes-devhost-89`.
+ *
+ * Read from the `name` field of `<claudeHome>/sessions/<pid>.json`, which is also where Claude Code
+ * itself gets the address it quotes when asked. The registry only, deliberately: no transcript is
+ * touched, so this is cheap enough to call whenever a panel is refreshed.
+ *
+ * Nothing is cached, because this name belongs to the PROCESS. Restarting a session under the same
+ * id produces a different name, and once the process exits the name is gone for good - so a stale
+ * one shown as current would be worse than showing none.
+ */
+export function liveSessionName(sessionId: string, claudeHomeOverride?: string): string | undefined {
+	const match = readRegistry(claudeHome(claudeHomeOverride)).find(
+		session => session.sessionId === sessionId
+	);
+	return match?.name;
+}
+
+/**
  * How much of a transcript's tail is read looking for a title record.
  *
  * Measured on this machine: in transcripts up to 14.4 MB the last `ai-title` sat between 2.5 KB and

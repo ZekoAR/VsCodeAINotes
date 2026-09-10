@@ -25,6 +25,14 @@ export interface Note {
 export interface NotesDoc {
 	version: 2;
 	notes: Note[];
+	/**
+	 * The folder's own note, belonging to no session.
+	 *
+	 * Kept here rather than in a file of its own: this is the workspace's notes file, it already
+	 * writes atomically and is already watched for outside edits, and `.claude/` belongs to Claude
+	 * Code rather than to us. Absent until something is written, so an untouched file gains no key.
+	 */
+	general?: string;
 }
 
 export function emptyDoc(): NotesDoc {
@@ -102,19 +110,25 @@ function normalise(raw: string): NotesDoc {
 	}
 	const rec = (parsed ?? {}) as Record<string, unknown>;
 
+	// Carried through every branch below: a hand-edited file that has a general note but nothing else
+	// recognisable must not lose it.
+	const general = typeof rec.general === 'string' ? rec.general : undefined;
+	const withGeneral = (notes: Note[]): NotesDoc =>
+		general === undefined ? { version: 2, notes } : { version: 2, notes, general };
+
 	if (Array.isArray(rec.notes)) {
 		const notes = rec.notes
 			.map(entry => readNote(entry as Record<string, unknown>))
 			.filter((note): note is Note => note !== undefined);
-		return { version: 2, notes };
+		return withGeneral(notes);
 	}
 
 	// Version 1: one note, its fields at the top level. Migrate rather than discard.
 	if (typeof rec.text === 'string' || rec.session) {
 		const migrated = readNote(rec);
-		return { version: 2, notes: migrated ? [migrated] : [] };
+		return withGeneral(migrated ? [migrated] : []);
 	}
-	return emptyDoc();
+	return withGeneral([]);
 }
 
 function readNote(rec: Record<string, unknown> | undefined): Note | undefined {

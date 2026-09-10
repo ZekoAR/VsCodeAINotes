@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Notes</title>
+<style>
+	/* Its own document, not a webview, so none of VS Code's --vscode-* theme variables exist here.
+	   The colours are hard-coded against the dark theme until we decide how theming reaches this. */
+	html, body {
+		height: 100%;
+		margin: 0;
+	}
+	body {
+		display: flex;
+		flex-direction: column;
+		background: #1e1e1e;
+		color: #ddd;
+		font: 12px/1.5 "Segoe UI", sans-serif;
+	}
+	/* The note and its footer sit in one rounded, padded box, the way the Claude prompt input does.
+	   The border is on the box rather than the textarea so that focus lights the whole thing. */
+	#box {
+		flex: 1 1 auto;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		box-sizing: border-box;
+		/* 2px at the top: the splitbar sits directly above this frame, and the gap between the two is
+		   this margin. The sides and bottom keep their breathing room. */
+		margin: 2px 8px 8px;
+		padding: 6px 8px 4px;
+		border: 1px solid #3a3a3a;
+		border-radius: 10px;
+		background: #232323;
+		transition: border-color 120ms ease;
+	}
+	/* `focus-within`, not `textarea:focus`: the highlight belongs to the container the reader sees
+	   as one control, and the focus actually lands on the textarea inside it. */
+	#box:focus-within {
+		border-color: #c96442;
+	}
+	textarea {
+		flex: 1 1 auto;
+		min-height: 0;
+		padding: 2px 2px 4px;
+		border: none;
+		outline: none;
+		resize: none;
+		background: transparent;
+		color: #e6e6e6;
+		font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
+	}
+	textarea:disabled {
+		color: #6f6f6f;
+	}
+	textarea::placeholder {
+		color: #6a6a6a;
+	}
+	/* VS Code's scrollbar colours, hard-coded: this is a plain document at the workbench origin, not
+	   a webview, so `--vscode-scrollbarSlider-*` does not exist here. Narrower than VS Code's 10px
+	   and rounded at the ends, which is a deliberate departure - the panel is a small box inside a
+	   tab, and a full-width square slider reads as heavier than everything around it. */
+	::-webkit-scrollbar {
+		width: 8px;
+		height: 8px;
+	}
+	::-webkit-scrollbar-track,
+	::-webkit-scrollbar-corner {
+		background: transparent;
+	}
+	::-webkit-scrollbar-thumb {
+		border-radius: 4px;
+		background: rgba(121, 121, 121, 0.4);
+	}
+	::-webkit-scrollbar-thumb:hover {
+		background: rgba(100, 100, 100, 0.7);
+	}
+	::-webkit-scrollbar-thumb:active {
+		background: rgba(191, 191, 191, 0.4);
+	}
+	/* Below the note, like the row of controls under the Claude prompt. */
+	#foot {
+		flex: 0 0 auto;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding-top: 2px;
+		font-size: 11px;
+		line-height: 18px;
+	}
+	#title {
+		color: #b8b8b8;
+		font-weight: 600;
+	}
+	#session {
+		color: #7a7a7a;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	#status {
+		margin-left: auto;
+		flex: 0 0 auto;
+		color: #6f6f6f;
+	}
+	/* Only a failure is coloured. A note loading or saving is the expected case and should not
+	   compete with the note for attention. */
+	#status.bad { color: #e06c5c; }
+	#stale {
+		flex: 1 1 auto;
+		min-height: 0;
+		margin: 8px;
+		padding: 12px;
+		border: 1px solid #3a3a3a;
+		border-radius: 10px;
+		background: #232323;
+		line-height: 1.6;
+	}
+	#stale a {
+		color: #6cb6ff;
+		cursor: pointer;
+		text-decoration: underline;
+	}
+	#stale .detail {
+		margin-top: 6px;
+		opacity: 0.65;
+	}
+</style>
+</head>
+<body>
+	<!-- The note first, its labels underneath: the same order as the Claude prompt, where the input
+	     is what you look at and the metadata sits below it. -->
+	<div id="box">
+		<textarea id="text" placeholder="Notes for this Claude session..." spellcheck="false" disabled></textarea>
+		<div id="foot">
+			<span id="title">AI Notes</span>
+			<span id="session">loading...</span>
+			<span id="status"></span>
+		</div>
+	</div>
+	<!-- Shown INSTEAD of the textarea when the injected payload is not the one the extension ships.
+	     Notes are deliberately withheld: showing them would look like it works while running code
+	     nobody shipped, and a save from here could be handled by a contract that has since changed. -->
+	<div id="stale" style="display:none"></div>
+
+	<script>
+		(function () {
+			'use strict';
+
+			// Matches the extension's own `ainotes.autosaveDelayMs` default, so a note typed here and
+			// a note typed in the editor settle at the same pace.
+			const SAVE_DELAY_MS = 800;
+
+			const els = {
+				session: document.getElementById('session'),
+				status: document.getElementById('status'),
+				text: document.getElementById('text'),
+				box: document.getElementById('box'),
+				stale: document.getElementById('stale')
+			};
+
+			let saveTimer;
+			/** Set while a push writes into the textarea, so arriving text is not itself an edit. */
+			let loading = false;
+			/** Set from the first keystroke until the save goes out, so a push cannot eat an edit. */
+			let dirty = false;
+
+			function status(text, kind) {
+				els.status.textContent = text;
+				els.status.className = kind || '';
+			}
+
+			// Handed to this frame in its url by the script that built it, and returned on every
+			// message so the host can route the answer without relying on window identity.
+			const panel = new URLSearchParams(location.search).get('panel');
+
+			function ask(kind, text) {
+				parent.postMessage({ source: 'ainotes-ui', panel, kind, text }, '*');
+			}
+
+			els.text.addEventListener('input', () => {
+				if (loading) {
+					return;
+				}
+				dirty = true;
+				status('typing...');
+				clearTimeout(saveTimer);
+				saveTimer = setTimeout(() => {
+					// `dirty` stays set until the save is acknowledged, not merely dispatched. It is
+					// what stops an incoming push overwriting text that is not on disk yet, and a
+					// save can fail after being sent - the side panel may be gone.
+					status('saving...');
+					ask('save', els.text.value);
+				}, SAVE_DELAY_MS);
+			});
+
+			/**
+			 * Swap the note out for the update offer.
+			 *
+			 * Built with `createElement` and `textContent`, never `innerHTML`: the revisions arrive
+			 * from another process, and the workbench enforces Trusted Types with a closed policy
+			 * list, so an HTML sink here would be refused outright.
+			 */
+			function showStale(installed, expected) {
+				els.box.style.display = 'none';
+				els.stale.style.display = 'block';
+				els.session.textContent = 'update required';
+				status('');
+
+				const line = document.createElement('div');
+				line.textContent = 'You Must Update The Injected Script ';
+
+				const link = document.createElement('a');
+				link.textContent = 'Click here';
+				link.setAttribute('role', 'button');
+				link.tabIndex = 0;
+				const run = () => {
+					els.stale.replaceChildren(
+						document.createTextNode('Updating the injected script...')
+					);
+					ask('updateInjections');
+				};
+				link.addEventListener('click', run);
+				link.addEventListener('keydown', event => {
+					if (event.key === 'Enter' || event.key === ' ') {
+						event.preventDefault();
+						run();
+					}
+				});
+				line.appendChild(link);
+
+				const detail = document.createElement('div');
+				detail.className = 'detail';
+				detail.textContent = 'injected ' + installed + ', extension ships ' + expected;
+
+				els.stale.replaceChildren(line, detail);
+			}
+
+			window.addEventListener('message', event => {
+				const data = event.data;
+				if (!data || data.source !== 'ainotes-host') {
+					return;
+				}
+				if (data.kind === 'stale') {
+					showStale(data.installed, data.expected);
+					return;
+				}
+				if (data.kind === 'patched') {
+					// The files on disk are new; this document and its script are still the old ones,
+					// because the workbench only reads them when it loads.
+					els.box.style.display = 'none';
+					els.stale.style.display = 'block';
+					els.stale.replaceChildren(
+						document.createTextNode('Please restart VS Code for the changes to take effect.')
+					);
+					return;
+				}
+				if (data.kind === 'notes') {
+					// Whatever the host sends, whenever it sends it. Nothing is awaited here, so
+					// there is no deadline to miss and nothing to retry - a note that arrives late,
+					// or again because it changed elsewhere, is handled by the same path.
+					const incoming = data.text || '';
+					// Never overwrite what is being typed. A push that agrees with the box is a
+					// no-op, and one that disagrees while the reader is mid-edit would eat keystrokes.
+					if (incoming !== els.text.value && !dirty) {
+						loading = true;
+						els.text.value = incoming;
+						loading = false;
+					}
+					els.text.disabled = false;
+					// The messaging address, not the session uuid: this is the name Claude quotes when
+					// asked how to reach it, so it is the one worth being able to read off the panel.
+					// It exists only while the process does, hence the fallback rather than a stale one.
+					els.session.textContent = data.agent || 'not running';
+					if (dirty) {
+						// Reconnected with text that never made it to disk - send it again now rather
+						// than leaving the reader to nudge a key to trigger a save.
+						status('reconnected, saving...');
+						ask('save', els.text.value);
+					} else {
+						status(incoming ? 'loaded' : 'empty');
+					}
+					return;
+				}
+				if (data.kind === 'saved') {
+					// An explicit acknowledgement rather than assuming: showing "saved" the moment a
+					// message is dispatched would claim something nobody had confirmed. This is also
+					// the only thing that clears `dirty`, so unsaved text is never overwritten.
+					dirty = false;
+					status('saved ' + new Date(data.at || Date.now()).toLocaleTimeString());
+					return;
+				}
+				if (data.kind === 'error') {
+					// Only locked when there is nothing at risk. Text typed but not yet saved stays
+					// editable: it survives here, `dirty` protects it from being overwritten, and it
+					// is re-sent the moment the panel reconnects. Disabling mid-sentence would strand
+					// the reader for a condition that recovers on its own.
+					els.text.disabled = !dirty;
+					els.session.textContent = 'not connected';
+					// Not final: the host keeps announcing this panel, so a session that becomes
+					// resolvable later arrives as a `notes` event with nothing pressed here.
+					status(data.problem || 'failed', 'bad');
+				}
+			});
+
+			// Say we exist, once. The host announces this panel until the notes arrive, so there is
+			// nothing to retry from here and no deadline to arm.
+			status('connecting...');
+			ask('ready');
+		})();
+	</script>
+</body>
+</html>

@@ -1,52 +1,123 @@
 # AI Notes
 
-A VS Code panel for writing notes that belong to a specific Claude Code session, stored in a
-dot-file in the workspace.
+Notes that live **inside** the Claude Code tab they belong to, stored in a dot-file in the workspace.
+
+One note per Claude session. Open a Claude Code tab, press the small `n` button in its bottom-left
+corner, and a note panel opens in the lower part of that tab. The note is bound to the session in
+that tab, not to the window or the file you were looking at.
 
 ## What it does
 
-- **The notes are an editor tab**, not a side-bar view. Being an editor is what lets you dock them
-  above, below or beside any other tab, split them across editor groups, or float them into their
-  own window - exactly the way a Claude Code tab docks. The editor area hosts editors and nothing
-  else, so a view could never go there. The tab is captioned `Notes: <session title>` once a
-  session is connected, and `AI Notes` before that.
-- **The panel has four states.** Not connected: a single centred **Select AI Session** button.
-  Connected: the notes, with **Continue in Session** and **Switch AI Session** links in the
-  textarea's top-right corner. Connected but the session has ended: the notes disabled under a
-  banner reading *The connected AI session is not running.* carrying those links and
-  **Reconnect to Active**. Picking: a search field and a scrollable list that take over the whole
-  panel.
-- **The session list lives in the panel**, not in the quick-pick dropdown at the top of the window.
-  Each row shows the session's title, its age, the first eight characters of its id and its pid.
-  Running sessions come first, most recently active at the top, ties broken alphabetically by
-  title; sessions that are not running are dimmed and sorted below them. Typing in the search field
-  filters by title or id, `Enter` takes the first match, and `Escape` cancels. A back arrow appears
-  in front of the search field only when a session is already connected, since only then is there
-  something to go back to.
-- **A side panel in the activity bar**: a **New Note Editor** button on top, and below it the Claude
-  sessions you can open notes for. **Double-click** a session to open its notes, creating them if
-  that session has none yet. It is a webview rather than a tree because the VS Code API has no
-  double-click event at all - `TreeItem.command` fires on single-click selection. `Enter` opens the
-  focused row too, so it stays keyboard-reachable.
-- **One note per session, several notes per workspace.** Opening a session that already has notes
-  reveals that tab rather than making a second view of the same text. The side panel lists every
-  running session, plus any session that already has notes and is no longer running - dimmed, and
-  below the rest, so those notes cannot become unreachable.
-- **Autosave** to `.ainotes.json` in the workspace root: each note's text, the session it belongs
-  to, and when it was last updated. `Ctrl+S` inside a textarea saves immediately.
-- **Read-only once the connected session stops running**, and **editable again the moment it comes
-  back**. The notes of a finished session are history, but nothing needs reconnecting: the panel is
-  bound to a session *id*, and a resumed session reappears under the same id with a fresh pid. A
-  watch on the live-session registry picks both transitions up in about 170 ms, measured. The panel
-  also re-checks whenever its tab regains focus, and a 60-second poll is the backstop for a watch
-  that never started.
+- **The note is part of the Claude tab.** Not a side-bar view, not a separate editor tab. Opening the
+  panel makes Claude's own content *shrink* to make room rather than being covered, so both are
+  usable at once. Drag the splitter at the top of the panel to resize it; the height is remembered
+  per session, so the next time that session's tab is open the panel comes back the size you left it.
+- **The button says whether there is anything in there.** A rounded square with a lowercase `n` when
+  the session has no note, a bold capital `N` when it does - readable without opening the panel.
+- **Autosave**, 800 ms after you stop typing. The footer under the note reads `typing…`, `saving…`,
+  then `saved 09:14:22`. Only a failure is coloured; everything else stays muted, because saving is
+  the expected case and should not compete with the note for attention.
+- **The footer shows the session's messaging address** - `ainotes-2f`, the same name Claude quotes
+  when you ask it how another session can reach it. It reads `not running` when the session's process
+  has gone, because that name belongs to the process and stops existing with it.
+- **The side panel** in the activity bar shows the state of the injection and lists the Claude Code
+  tabs currently open. **Double-click** a row to focus that tab; it flashes orange three times so you
+  can see which one it was. The hamburger button at the bottom reveals **Patch VS Code** and
+  **Un-patch VS Code**.
+- **A note edited elsewhere reaches the panel.** Editing `.ainotes.json` by hand reloads any panel
+  showing that note. Text you have typed but not yet saved is never overwritten by an incoming
+  update, and it is re-sent automatically if the panel reconnects.
 
-Every tab survives a window reload with its text, its note and its docked position intact.
+## Why it patches VS Code
+
+This is the part worth understanding before installing it, because it modifies your VS Code
+installation.
+
+There is no supported way to put anything inside another extension's tab, and every route was tried:
+
+- `contributes.menus` only reaches menu locations VS Code itself defines, or views the extension
+  registers. There is no contribution point that reaches into a webview owned by a different
+  extension.
+- Claude Code's tab is a webview, which VS Code renders in an iframe with its own
+  `vscode-webview://` origin specifically so extensions cannot reach each other's content. That is a
+  same-origin-policy wall, not a missing API, so nothing gets inside that frame.
+- A companion editor group underneath the tab does not follow it. Editor groups are independent of
+  tab identity, and VS Code exposes no event or API to make one chase another, so dragging the Claude
+  tab anywhere would leave the notes behind.
+
+What *does* work: VS Code parks every webview in a top-level overlay container and glues it over the
+editor with CSS anchor positioning. A panel added to that container is positioned by VS Code's own
+layout, so it tracks the tab through splits, drags between groups and resizes with no code of ours
+involved. Reaching that container needs a script running in the workbench, and the only way in is to
+add a `<script>` tag to VS Code's `workbench.html`.
+
+**Two consequences, both real:**
+
+- VS Code checksums its own files and will eventually show **"Your Code installation appears to be
+  corrupt"**. Nothing is broken; the banner has a *Don't Show Again* on its gear. Anyone running a
+  custom CSS/JS loader lives with the same one.
+- Every VS Code update installs a fresh app directory, which does not contain the patch. The side
+  panel notices and offers to re-apply it.
+
+**Un-patch VS Code** reverses it completely: the injected tag is removed and the two payload files are
+deleted, leaving `workbench.html` byte-identical to how it started.
+
+## Activating it
+
+1. Open the **AI Notes** view in the activity bar.
+2. If the banner says *Click here to activate in vscode. Requires restart.*, press it - or open the
+   hamburger menu and press **Patch VS Code**.
+3. **Restart VS Code fully.** A window reload is not enough: `workbench.html` is only read when the
+   window's document loads.
+
+The view must be opened at least once per window, because it is the road between the panels and the
+notes file (see below). A panel that cannot find it says so rather than sitting blank.
+
+### Keeping the injection current
+
+The injected payload carries a **revision**: a hash of the two files the extension ships, stamped into
+the copy when it is installed. On every connection the payload reports it, and the extension compares
+it against what it currently ships.
+
+- **Match** - nothing to do.
+- **Mismatch** - the side panel and every open note panel show *You Must Update The Injected Script -
+  Click here*, with both revisions underneath. Pressing it re-runs the injector, then asks for a
+  restart. A stale panel deliberately shows no note at all: displaying one would look like it worked
+  while running code the extension did not ship.
+- **No revision at all** - treated as current. That is the development case, where a payload was
+  copied in by hand or by a build that predates stamping, and enforcing a version there would mean
+  re-running the injector after every edit just to be allowed to test.
+
+A content hash rather than a version number on purpose: a hand-maintained version only changes when
+someone remembers to change it, and a stale payload reporting a perfectly correct version is exactly
+the failure this is meant to catch.
+
+## How it fits together
+
+The panel is a page of our own framed inside the Claude tab. It has no access to the extension host
+and none to the filesystem - the workbench renderer is sandboxed, so there is no `fs`, and the File
+System Access API is present but refuses the grant. Every read and write therefore travels:
+
+```
+note panel  --postMessage-->  injected script      (same origin)
+            --postMessage-->  AI Notes side panel  (a real webview)
+            --acquireVsCodeApi-->  extension host  --> .ainotes.json
+```
+
+and back the same way. Three things follow from that shape:
+
+- **The side panel's webview is the relay**, so it is kept alive while hidden. Without that, selecting
+  any other view container would dispose it and every note panel would go silent.
+- **It is event driven, not request/response.** A panel announces itself; it is sent its note when the
+  other side is ready. There are no timeouts and no deadlines to miss, so start-up order does not
+  matter - whichever side comes up last triggers the sync.
+- **A closed and reopened Claude tab recovers on its own.** A one-second sweep drops panels whose tab
+  has gone, rebuilds any container VS Code emptied, and keeps announcing anything not yet connected.
 
 ## The notes file
 
-`.ainotes.json` in the workspace root (configurable). It is written whole, through a temp file and
-a rename, so a crash mid-write cannot leave a half-written file where the notes used to be.
+`.ainotes.json` in the workspace root (configurable). It is written whole, through a sibling temp file
+and a rename, so a crash mid-write cannot leave a half-written file where the notes used to be.
 
 ```json
 {
@@ -68,64 +139,18 @@ a rename, so a crash mid-write cannot leave a half-written file where the notes 
 }
 ```
 
-A **version 1** file, which held one note with its fields at the top level, migrates into the array
-on first read. Nothing is discarded, including a file that has been hand-edited into something that
-is not valid JSON at all - its contents become the text of a note rather than being dropped.
+A **version 1** file, which held one note with its fields at the top level, migrates into the array on
+first read. Nothing is discarded, including a file that has been hand-edited into something that is
+not valid JSON at all - its contents become the text of a note rather than being dropped.
 
-The file is watched. Editing it in a normal editor tab reloads the panels, so the two views cannot
-silently overwrite each other - unless a panel has unsaved keystrokes, which are newer and win.
+A note is created on the first save, not when a panel opens, so glancing at a session never adds an
+empty row to the file.
 
 `.ainotes.json` is git-ignored by default: it is per-developer state, not a deliverable. Remove the
 entry from `.gitignore` if you want the notes committed.
 
-### Switching a note editor's session
-
-A note belongs to a session, so switching an editor's session moves the EDITOR, not the note. The
-notes on screen stay with the session they were written for, and the editor lands on the target
-session's notes - the ones it already has, or an empty note if it has none. Notes written for one
-session are never re-filed under another.
-
-The one exception is a note connected to nothing, which has no session to leave anything behind in
-and is therefore filed under the target in place. An editor in that state shows a *Select AI Session*
-button and no text field at all, so a new note is always empty when it is filed. A note that was
-disconnected keeps its text parked in the file and gets it back when it is connected again.
-
-A note left behind with nothing in it is dropped rather than kept as an empty row in the file. If the
-target session's notes are already open in another tab, that tab is revealed instead - two tabs on
-one note would fight over its text.
-
-### Continuing in another session
-
-**Switch AI Session** moves the editor onto another session's notes and leaves the text where it
-was. **Continue in Session** takes the text with you: the notes on screen are copied into the
-session you pick, and the editor follows them there.
-
-The copy is **appended**, under a `---` rule on its own line, so notes the target session already
-had are never overwritten and the two bodies stay legible. The session you came from keeps its own
-copy - this carries notes forward, it does not move them out.
-
-That mode lists **running sessions only**. A note whose session has ended is history and cannot take
-new text, so offering one would silently drop what you carried. It is also the reason the action sits
-in the ended-session banner: carrying your notes into the session that replaced this one is exactly
-what you want when the old one stops.
-
-### After a window reload
-
-Reloading the window restarts Claude Code's session, and the notes tab comes back first. Measured on
-this machine, 18 seconds passed between the reload and the session registering in
-`~/.claude/sessions`, so the first look always reports the session as gone and means nothing.
-
-A restored tab therefore looks again at 0.4, 1.2, 2.5, 4 and 6 seconds. If the session it is bound to
-comes back in that window, nothing else happens - it was never really disconnected. Only when the
-last attempt still finds it gone is the session treated as ended, and the editor moves onto the
-session this window is working with: the one named by the active Claude tab's caption, or the single
-session running in this folder. It says so in the status bar when it does, because that changes the
-text on screen without being asked.
-
-If nothing can be resolved - no Claude tab, or two running sessions and no way to tell them apart -
-the editor stays where it is and shows the usual banner, which carries a **Reconnect to Active**
-button beside **Switch AI Session**. Notes connected to nothing are left alone: an editor that was
-never bound has nothing to reconnect to.
+Panel heights are **not** in this file. They are per-machine view state, kept in VS Code's workspace
+storage, because a window size has no business turning up in a diff.
 
 ## How sessions are found
 
@@ -133,66 +158,46 @@ Two sources, because they answer different questions:
 
 | Source | Answers | Gives |
 | --- | --- | --- |
-| `~/.claude/sessions/<pid>.json` | what is **running now** | session id, cwd, pid, start time, and the session's **name** (`zod-ea`) |
+| `~/.claude/sessions/<pid>.json` | what is **running now** | session id, cwd, pid, start time, and the session's **name** (`ainotes-2f`) |
 | `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` | what has **ever run** in this folder | session id, last activity, the session's **title**, and the first prompt the human typed |
 
-A session is listed as live only when a process with its pid is still running - a registry file
-outlives its process, so without that check the picker lists ghosts.
+A session counts as live only when a process with its pid is still running - a registry file outlives
+its process, so without that check the list would show ghosts.
 
-### Two different names, and why the title wins
+### Two different names
 
-A session has two names, and only one of them is worth showing.
+The **registry name** (`ainotes-2f`, `zod-ea`) belongs to a **process**, and it is the address used for
+cross-session messaging. Restarting Claude under the same session id produces a different one: session
+`d79fa84e-…` was `ainotes-cb` one hour and `ainotes-b0` the next. It is read fresh every time and
+never cached, because a remembered one is the address of a process that has gone. This is what the
+note panel's footer shows.
 
-The **registry name** (`zod-ea`, `ainotes-b0`) belongs to a **process**. Restarting Claude under the
-same session id produces a different one: session `d79fa84e-b5b8-45a8-9aa0-4f9948115545` was
-`ainotes-cb` one hour and `ainotes-b0` the next. It is not derivable from the session id either - the
-prefix is the folder basename lowercased, but the two-hex suffix matched none of eight candidate
-hashes of the id, pid or cwd. It is shown in the picker's detail line, to tell two live sessions on
-the same topic apart, and nowhere else.
+The **title** belongs to the session. Claude Code writes an `ai-title` record into the transcript once
+the topic is clear and rewrites it as the topic moves, and a `custom-title` record when the session is
+renamed by hand. It survives restarts and outlives the session, and a rename beats the generated title
+- the same precedence Claude Code's own extension uses.
 
-The **title** belongs to the session. Claude Code writes an `ai-title` record into the transcript
-once the topic is clear and rewrites it as the topic moves (`"Shattering Sphere determinism
-investigation"`, `"GUI2D editor refinements"`), and a `custom-title` record when the session is
-renamed by hand. It survives restarts, and it survives the session exiting. A rename beats the
-generated title, which is the same precedence the Claude Code extension itself uses.
+Titles are read from the last 512 KB of the transcript rather than by parsing the whole file. Measured
+on transcripts up to 14.4 MB, the last `ai-title` sat between 2.5 KB and 31 KB from the end.
 
-So the label everywhere - tab caption, side panel row, session list - is **title, else first prompt,
-else short session id**, re-resolved on the 60-second poll.
+The transcript folder name is the workspace path with every non-alphanumeric character replaced by a
+dash (`c:\D\AINotes` becomes `c--D-AINotes`). VS Code and Claude Code do not always agree on the drive
+letter's case, so the folder is matched case-insensitively against what is on disk.
 
-Titles are read from the last 512 KB of the transcript rather than by parsing the whole file.
-Measured on transcripts up to 14.4 MB, the last `ai-title` sat between 2.5 KB and 31 KB from the end.
-The window is the one real limit: a `custom-title` written once and then buried under more than
-512 KB of later conversation is not found, which is the same failure the official extension has with
-its 64 KB window, with eight times the margin.
+### How a panel knows which session it is in
 
-The transcript folder name is the workspace path with every non-alphanumeric character replaced by
-a dash (`c:\D\AINotes` becomes `c--D-AINotes`). VS Code and Claude Code do not always agree on the
-drive letter's case, so the folder is matched case-insensitively against what is on disk.
+The panel knows which tab it sits in, and nothing more - the Claude webview's own URL carries a
+webview id and no session id. So it reports the tab's **caption**, and the extension resolves that:
+exact title match first, then a prefix match, then the one session running in this folder.
 
-### Why a Claude tab is identified by its caption
-
-*Bind to Active Claude Session* reads the tab's caption, which looks indirect until you try the
-alternatives. Dragging a Claude tab into a note editor delivers nothing to build on: VS Code fills a
-tab drag's data transfer only for editors that resolve to a resource, a webview editor resolves to
-none, and a plain tab drag suppresses even the `text/plain` fallback. The webview does receive the
-drop if Shift is held, because that restores pointer events on the iframe, but what arrives is empty.
-Nor is there a contract to fall back on: the extension API documents drag and drop for tree views and
-text editors only, never for webviews, and the request for webview drag-and-drop events was closed as
-out of scope.
-
-The tab itself carries no more: `TabInputWebview` exposes a view type and nothing else - no uri, no
-panel handle - so a caption is the only identity a Claude tab has. Claude Code sets that caption to
-the session's own title, which is the same string this extension reads out of the transcript, so the
-two can be matched. Claude Code's own extension resolves its tab commands the same way, and gives up
-the same way when two tabs cannot be told apart.
+The prefix match earns its place: VS Code truncates a long tab caption with an ellipsis
+(`Claude capabilities over…`) in the label *and* in `aria-label`, with no untruncated copy anywhere in
+the DOM, so an exact comparison can never match a long title.
 
 ## Commands
 
 | Command | Does |
 | --- | --- |
-| `AI Notes: New Note Editor` | Opens a new, unconnected note editor |
-| `AI Notes: Bind to Active Claude Session` | Connects the note editor that has focus to the session this window is working with: the Claude Code tab selected in its own group, else the single session running in this folder. Falls back to the quick-pick when neither resolves |
-| `AI Notes: Pick Claude Session` | Connects the note editor that has focus, as a quick-pick. Each editor has its own list; this is for the command palette |
 | `AI Notes: Save Notes Now` | Flushes pending keystrokes to disk |
 | `AI Notes: Open Notes File` | Opens `.ainotes.json` in an editor tab |
 
@@ -202,7 +207,7 @@ the same way when two tabs cannot be told apart.
 | --- | --- | --- |
 | `ainotes.storeFileName` | `.ainotes.json` | Name of the dot-file, relative to the workspace root |
 | `ainotes.autosaveDelayMs` | `800` | Idle time after the last keystroke before writing |
-| `ainotes.sessionHistoryLimit` | `25` | How many past sessions the picker lists below the live ones |
+| `ainotes.sessionHistoryLimit` | `25` | How many past sessions are considered when resolving a tab caption |
 | `ainotes.claudeHome` | `""` | Override the scanned Claude home. Empty means `$CLAUDE_CONFIG_DIR`, else `~/.claude` |
 
 ## Developing
@@ -214,14 +219,24 @@ npm run compile      # or: npm run watch
 
 Then press `F5` ("Run Extension") to launch an Extension Development Host.
 
+The injected payload is `media/ainotes-inject.js` (the script that runs in the workbench) and
+`media/ainotes-ui.html` (the page framed inside the Claude tab). Neither is compiled - the patch
+copies them in as they are - so after editing either one, press **Patch VS Code** to reinstall them
+and restart. The buttons live behind the hamburger menu in the side panel.
+
+Both halves log to the console with an `[AI Notes]` prefix: the injected script and the framed page to
+the **workbench** developer tools (Help → Toggle Developer Tools), the side panel to its own webview
+tools. The extension's side of every exchange goes to the **AI Notes** output channel, which needs no
+developer tools at all.
+
 `build.cmd` does the same from a shell, and `build.cmd --install` additionally packages
 `dist/ainotes-<version>.vsix` and installs it with `code --install-extension --force`. Reload the
 window afterwards to pick it up.
 
 ## Install
 
-
 ```
 .\build.cmd --install
 ```
-This builds the .vsix file and installs it locally.
+
+This builds the .vsix file and installs it locally. Then patch and restart, as above.

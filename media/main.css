@@ -1,3 +1,5 @@
+/* The activity-bar side panel. The notes themselves live in panels injected into the Claude tabs,
+   which style themselves - see media/ainotes-ui.html - so everything here dresses the panel only. */
 html,
 body {
 	height: 100%;
@@ -12,21 +14,20 @@ body {
 	font-family: var(--vscode-font-family);
 	font-size: var(--vscode-font-size);
 	background: transparent;
+	/* Nothing here is prose to be selected, and a double click on a row is an action - without this
+	   it also highlights the caption, which makes the click look like it did the wrong thing. */
+	user-select: none;
 }
 
-/* The panel switches between whole states, and several of them are flex containers, so the
-   `hidden` attribute has to beat their own `display`. */
+/* The exception: these carry revision strings and error text worth copying into a report. */
+.stale {
+	user-select: text;
+}
+
+/* Several states here are flex containers, so the `hidden` attribute has to beat their own
+   `display`. Toggling `display` directly is the alternative and is what the injected panel does. */
 [hidden] {
 	display: none !important;
-}
-
-/* Not connected: nothing but the way in. */
-.empty {
-	flex: 1 1 auto;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	padding: 16px;
 }
 
 .primary {
@@ -44,216 +45,48 @@ body {
 	background: var(--vscode-button-hoverBackground);
 }
 
-/* Connected, but the session behind these notes has ended. */
-.banner {
-	display: flex;
-	align-items: baseline;
-	flex-wrap: wrap;
-	gap: 6px;
-	flex: 0 0 auto;
-	margin: 8px 8px 0;
-	padding: 6px 10px;
-	border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground));
-	border-radius: 2px;
-	color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
-	background: var(--vscode-inputValidation-warningBackground, transparent);
-}
-
-/* Separates the banner's two actions without adding a third thing that looks clickable. */
-.banner-sep {
-	opacity: 0.5;
-}
-
-.link {
-	padding: 0;
-	border: none;
-	color: var(--vscode-textLink-foreground);
-	background: none;
-	font-family: inherit;
-	font-size: inherit;
-	cursor: pointer;
-}
-
-.link:hover {
-	color: var(--vscode-textLink-activeForeground);
-	text-decoration: underline;
-}
-
-.editor {
-	position: relative;
-	display: flex;
-	flex: 1 1 auto;
-	min-height: 60px;
-	margin: 8px;
-}
-
-.notes {
-	flex: 1 1 auto;
-	padding: 6px 8px;
-	resize: none;
-	border: 1px solid var(--vscode-input-border, transparent);
-	border-radius: 2px;
-	color: var(--vscode-input-foreground);
-	background: var(--vscode-input-background);
-	font-family: var(--vscode-editor-font-family);
-	font-size: var(--vscode-editor-font-size);
-	line-height: 1.45;
-}
-
-.notes::placeholder {
-	color: var(--vscode-input-placeholderForeground);
-}
-
-/* The bound session has stopped running, so its notes are read-only. */
-.notes:disabled {
-	color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground));
-	background: var(--vscode-input-background);
-	cursor: not-allowed;
-	opacity: 0.7;
-}
-
-/* Sits inside the textarea's top-right corner. Opaque, so text scrolling past goes behind it
-   rather than through it. */
-.switch {
-	position: absolute;
-	top: 1px;
-	right: 1px;
-	display: flex;
-	align-items: baseline;
-	gap: 6px;
-	max-width: calc(100% - 2px);
-	padding: 4px 8px;
-	border-radius: 0 2px 0 2px;
-	background: var(--vscode-input-background);
-	font-size: 0.9em;
-	opacity: 0.75;
-}
-
-.switch:hover {
-	opacity: 1;
-}
-
-.notes:focus-visible,
 .primary:focus-visible,
-.link:focus-visible {
-	outline: 1px solid var(--vscode-focusBorder);
-	outline-offset: -1px;
-}
-
-/* The session list, which replaces the panel's content rather than floating over it. */
-.picker {
-	display: flex;
-	flex-direction: column;
-	flex: 1 1 auto;
-	min-height: 0;
-	margin: 8px;
-	gap: 6px;
-}
-
-.picker-bar {
-	display: flex;
-	align-items: stretch;
-	gap: 4px;
-	flex: 0 0 auto;
-}
-
-.iconbtn {
-	flex: 0 0 auto;
-	width: 26px;
-	border: none;
-	border-radius: 2px;
-	color: var(--vscode-foreground);
-	background: transparent;
-	font-size: 15px;
-	line-height: 1;
-	cursor: pointer;
-}
-
-.iconbtn:hover {
-	background: var(--vscode-toolbar-hoverBackground);
-}
-
-.search {
-	flex: 1 1 auto;
-	min-width: 0;
-	padding: 5px 8px;
-	border: 1px solid var(--vscode-input-border, transparent);
-	border-radius: 2px;
-	color: var(--vscode-input-foreground);
-	background: var(--vscode-input-background);
-	font-family: inherit;
-	font-size: inherit;
-}
-
-.search:focus {
-	outline: 1px solid var(--vscode-focusBorder);
-	outline-offset: -1px;
-}
-
-.search::placeholder {
-	color: var(--vscode-input-placeholderForeground);
-}
-
-.picker-list {
-	flex: 1 1 auto;
-	min-height: 0;
-	overflow-y: auto;
-	border: 1px solid var(--vscode-input-border, transparent);
-	border-radius: 2px;
-	background: var(--vscode-input-background);
-}
-
-.row {
-	padding: 5px 9px;
-	border-left: 2px solid transparent;
-	cursor: pointer;
-}
-
-.row:hover {
-	background: var(--vscode-list-hoverBackground);
-}
-
+.iconbtn:focus-visible,
 .row:focus-visible {
 	outline: 1px solid var(--vscode-focusBorder);
 	outline-offset: -1px;
 }
 
-/* Not running. Sorted to the bottom by the host, dimmed here. */
-.row.dim {
-	opacity: 0.55;
-}
-
-.row.bound {
-	border-left-color: var(--vscode-textLink-foreground);
-}
-
-.row-title {
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-.row-meta {
-	display: flex;
-	gap: 10px;
-	margin-top: 1px;
-	color: var(--vscode-descriptionForeground);
-	font-size: 0.85em;
-}
-
-.row-none {
-	padding: 10px;
-	color: var(--vscode-descriptionForeground);
-}
-
-/* The activity-bar side panel: a button, then the sessions you can open notes for. */
 .side {
 	padding: 0;
 }
 
-.side-top {
+/* The menu's contents, between the list and the menu button itself. */
+.side-bottom {
 	flex: 0 0 auto;
-	padding: 8px 8px 6px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 6px 8px;
+}
+
+.side-menu {
+	flex: 0 0 auto;
+	display: flex;
+	justify-content: flex-end;
+	padding: 2px 6px 6px;
+}
+
+.iconbtn {
+	padding: 2px 6px;
+	border: none;
+	border-radius: 2px;
+	color: var(--vscode-descriptionForeground);
+	background: transparent;
+	font-family: inherit;
+	font-size: 14px;
+	line-height: 18px;
+	cursor: pointer;
+}
+
+.iconbtn:hover {
+	color: var(--vscode-foreground);
+	background: var(--vscode-toolbar-hoverBackground);
 }
 
 .primary.wide {
@@ -266,31 +99,163 @@ body {
 	overflow-y: auto;
 }
 
-.side-hint {
-	flex: 0 0 auto;
-	padding: 6px 9px 8px;
-	color: var(--vscode-descriptionForeground);
-	font-size: 0.85em;
+/* One open Claude tab. */
+.row {
+	margin-bottom: 2px;
+	padding: 5px 9px;
+	border-left: 2px solid transparent;
+	cursor: pointer;
 }
 
-/* A session that already has notes. */
+.row:hover {
+	background: var(--vscode-list-hoverBackground);
+}
+
+/* The tab that is currently selected in its group. */
 .row.noted {
 	border-left-color: var(--vscode-textLink-foreground);
 }
 
-.status {
-	display: flex;
-	justify-content: space-between;
-	gap: 8px;
-	padding: 0 9px 8px;
-	flex: 0 0 auto;
-	color: var(--vscode-descriptionForeground);
-	font-size: 0.9em;
-}
-
-.status .file-name {
+.row-title {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-	opacity: 0.75;
 }
+
+/* The note, on one line. The panel is narrow and a note is arbitrary text, so it is clipped with an
+   ellipsis here and shown whole in the row's tooltip. */
+.row-meta {
+	margin-top: 1px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.85em;
+}
+
+/* "no notes" is the absence of content, not content. */
+.row-meta.empty {
+	opacity: 0.6;
+	font-style: italic;
+}
+
+/* The folder's own note. Sized by the splitter above it, so its height is set inline from what was
+   stored - the flex basis is what actually decides it. */
+#general {
+	flex: 0 0 auto;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+}
+
+/* Transparent at rest so it draws no line across the panel, but still occupying its space, with a
+   three-dot grip as the only thing that says "drag me". The same treatment as the injected panel. */
+#general-split {
+	flex: 0 0 4px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: transparent;
+	cursor: row-resize;
+	transition: background 150ms;
+}
+
+#general-split:hover,
+#general-split.dragging {
+	background: #c96442;
+}
+
+#general-split .grip {
+	display: flex;
+	align-items: center;
+	gap: 3px;
+	transition: opacity 150ms;
+}
+
+#general-split:hover .grip,
+#general-split.dragging .grip {
+	opacity: 0;
+}
+
+#general-split .grip i {
+	width: 2px;
+	height: 2px;
+	border-radius: 50%;
+	background: var(--vscode-descriptionForeground);
+}
+
+/* Styled like the field in the injected panel: one rounded box, and the focus ring on the box
+   rather than an outline, so the two surfaces read as the same product. */
+#general-text {
+	flex: 1 1 auto;
+	min-height: 0;
+	box-sizing: border-box;
+	margin: 0 8px 6px;
+	padding: 6px 8px;
+	border: 1px solid var(--vscode-input-border, #3a3a3a);
+	border-radius: 10px;
+	outline: none;
+	resize: none;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	font-family: var(--vscode-editor-font-family);
+	font-size: var(--vscode-editor-font-size);
+	line-height: 1.5;
+	transition: border-color 120ms ease;
+}
+
+#general-text:focus {
+	border-color: #c96442;
+}
+
+#general-text::placeholder {
+	color: var(--vscode-input-placeholderForeground);
+}
+
+/* The hover card, matching VS Code's own hover widget rather than the OS tooltip, which cannot be
+   themed. `pointer-events: none` is not decoration: the card can sit over the row it belongs to,
+   and it must never swallow the double click. */
+#tip {
+	position: fixed;
+	z-index: 20;
+	box-sizing: border-box;
+	max-width: calc(100vw - 12px);
+	max-height: 45vh;
+	overflow-y: auto;
+	padding: 4px 8px;
+	border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-widget-border, #454545));
+	border-radius: 3px;
+	background: var(--vscode-editorHoverWidget-background, var(--vscode-editorWidget-background));
+	color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+	box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+	font-size: 0.9em;
+	line-height: 1.45;
+	/* Multi-line: a note's own line breaks survive, and long lines wrap inside the panel. */
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	pointer-events: none;
+}
+
+.row-none {
+	padding: 10px;
+	color: var(--vscode-descriptionForeground);
+}
+
+/* The injection needing attention: absent, or a revision this extension did not ship. Styled as a
+   warning rather than an error - nothing is broken, but the panels in Claude tabs are not current. */
+.stale {
+	flex: 0 0 auto;
+	margin: 0 8px 6px;
+	padding: 6px 8px;
+	border: 1px solid var(--vscode-inputValidation-warningBorder, #c8321e);
+	border-radius: 2px;
+	background: var(--vscode-inputValidation-warningBackground, rgba(200, 50, 30, 0.15));
+	color: var(--vscode-foreground);
+}
+
+.stale a {
+	color: var(--vscode-textLink-foreground);
+	cursor: pointer;
+	text-decoration: underline;
+}
+

@@ -14,9 +14,7 @@
     "Other"
   ],
   "main": "./out/extension.js",
-  "activationEvents": [
-    "onWebviewPanel:ainotes.editor"
-  ],
+  "activationEvents": [],
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -31,30 +29,12 @@
       "ainotes": [
         {
           "id": "ainotes.sidePanel",
-          "name": "Notes",
+          "name": "AI Notes",
           "type": "webview"
         }
       ]
     },
     "commands": [
-      {
-        "command": "ainotes.newNote",
-        "title": "New Note Editor",
-        "category": "AI Notes",
-        "icon": "$(add)"
-      },
-      {
-        "command": "ainotes.bindActiveSession",
-        "title": "Bind to Active Claude Session",
-        "category": "AI Notes",
-        "icon": "$(link)"
-      },
-      {
-        "command": "ainotes.pickSession",
-        "title": "Pick Claude Session",
-        "category": "AI Notes",
-        "icon": "$(comment-discussion)"
-      },
       {
         "command": "ainotes.save",
         "title": "Save Notes Now",
@@ -71,36 +51,9 @@
     "menus": {
       "view/title": [
         {
-          "command": "ainotes.newNote",
-          "when": "view == ainotes.sidePanel",
-          "group": "navigation@1"
-        },
-        {
           "command": "ainotes.openStoreFile",
           "when": "view == ainotes.sidePanel",
           "group": "navigation@2"
-        }
-      ],
-      "editor/title": [
-        {
-          "command": "ainotes.bindActiveSession",
-          "when": "activeWebviewPanelId == ainotes.editor",
-          "group": "navigation@1"
-        },
-        {
-          "command": "ainotes.pickSession",
-          "when": "activeWebviewPanelId == ainotes.editor",
-          "group": "navigation@2"
-        },
-        {
-          "command": "ainotes.save",
-          "when": "activeWebviewPanelId == ainotes.editor",
-          "group": "navigation@3"
-        },
-        {
-          "command": "ainotes.openStoreFile",
-          "when": "activeWebviewPanelId == ainotes.editor",
-          "group": "navigation@4"
         }
       ]
     },
