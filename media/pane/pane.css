@@ -1,0 +1,112 @@
+/* The note pane's looks. Pushed from the extension into the framed page at runtime, so changing
+   anything here reaches a Claude tab on the next VS Code start with no re-patching: this file is
+   part of the extension, not of the payload copied into the VS Code install.
+
+   Its own document, not a webview, so none of VS Code's --vscode-* theme variables exist here. The
+   colours are hard-coded against the dark theme until we decide how theming reaches this. */
+
+/* The note and its footer sit in one rounded, padded box, the way the Claude prompt input does.
+   The border is on the box rather than the textarea so that focus lights the whole thing. */
+#box {
+	flex: 1 1 auto;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	box-sizing: border-box;
+	/* 2px at the top: the splitbar sits directly above this frame, and the gap between the two is
+	   this margin. The sides and bottom keep their breathing room. */
+	margin: 2px 8px 8px;
+	padding: 6px 8px 4px;
+	border: 1px solid #3a3a3a;
+	border-radius: 10px;
+	background: #232323;
+	transition: border-color 120ms ease;
+}
+
+/* `focus-within`, not `textarea:focus`: the highlight belongs to the container the reader sees as
+   one control, and the focus actually lands on the textarea inside it. */
+#box:focus-within {
+	border-color: #c96442;
+}
+
+textarea {
+	flex: 1 1 auto;
+	min-height: 0;
+	padding: 2px 2px 4px;
+	border: none;
+	outline: none;
+	resize: none;
+	background: transparent;
+	color: #e6e6e6;
+	font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
+}
+
+textarea:disabled {
+	color: #6f6f6f;
+}
+
+textarea::placeholder {
+	color: #6a6a6a;
+}
+
+/* VS Code's scrollbar colours, hard-coded: this is a plain document at the workbench origin, not a
+   webview, so `--vscode-scrollbarSlider-*` does not exist here. Narrower than VS Code's 10px and
+   rounded at the ends, which is a deliberate departure - the panel is a small box inside a tab, and
+   a full-width square slider reads as heavier than everything around it. */
+::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+	background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+	border-radius: 4px;
+	background: rgba(121, 121, 121, 0.4);
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: rgba(100, 100, 100, 0.7);
+}
+
+::-webkit-scrollbar-thumb:active {
+	background: rgba(191, 191, 191, 0.4);
+}
+
+/* Below the note, like the row of controls under the Claude prompt. */
+#foot {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding-top: 2px;
+	font-size: 11px;
+	line-height: 18px;
+}
+
+#title {
+	color: #b8b8b8;
+	font-weight: 600;
+}
+
+#session {
+	color: #7a7a7a;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+#status {
+	margin-left: auto;
+	flex: 0 0 auto;
+	color: #6f6f6f;
+}
+
+/* Only a failure is coloured. A note loading or saving is the expected case and should not compete
+   with the note for attention. */
+#status.bad {
+	color: #e06c5c;
+}

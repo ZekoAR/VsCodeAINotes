@@ -22,7 +22,8 @@ that tab, not to the window or the file you were looking at.
   has gone, because that name belongs to the process and stops existing with it.
 - **The side panel** in the activity bar shows the state of the injection and lists the Claude Code
   tabs currently open. **Double-click** a row to focus that tab; it flashes orange three times so you
-  can see which one it was. The hamburger button at the bottom reveals **Patch VS Code** and
+  can see which one it was. Two tabs whose sessions share a title are told apart by position, so each
+  row still reaches its own tab. The hamburger button at the bottom reveals **Patch VS Code** and
   **Un-patch VS Code**.
 - **A note edited elsewhere reaches the panel.** Editing `.ainotes.json` by hand reloads any panel
   showing that note. Text you have typed but not yet saved is never overwritten by an incoming
@@ -92,6 +93,23 @@ A content hash rather than a version number on purpose: a hand-maintained versio
 someone remembers to change it, and a stale payload reporting a perfectly correct version is exactly
 the failure this is meant to catch.
 
+**What is installed is deliberately small.** Only two files are copied into VS Code:
+`media/ainotes-inject.js`, the script that runs in the workbench, and `media/ainotes-ui.html`, which
+is a **loader** - a framed page that draws nothing of its own. The note pane it shows lives in
+`media/pane` (`pane.css`, `pane.html`, `pane.js`), stays in the extension, and is **pushed to the
+loader at runtime** over the same road the notes travel. So the revision above is a hash of those two
+installed files only, and changing how the pane looks or behaves does not move it: update the
+extension, restart VS Code, and the new pane is there with no re-patching.
+
+That works because of one asymmetry. The workbench document allows no inline script and refuses every
+HTML sink through Trusted Types; the framed page has no CSP at all - it declares none and VS Code adds
+none to a file it serves - so markup and a script element there are exactly what they look like. The
+loader is where the pane can be delivered as text.
+
+The loader declares what it can run and the extension declares what its pane needs. A loader older
+than the pane gets the same *You Must Update The Injected Script* offer as a stale payload, rather than
+a pane that silently never appears.
+
 ## How it fits together
 
 The panel is a page of our own framed inside the Claude tab. It has no access to the extension host
@@ -113,6 +131,15 @@ and back the same way. Three things follow from that shape:
   matter - whichever side comes up last triggers the sync.
 - **A closed and reopened Claude tab recovers on its own.** A one-second sweep drops panels whose tab
   has gone, rebuilds any container VS Code emptied, and keeps announcing anything not yet connected.
+- **An editor moved into its own window keeps its panel.** *Move Editor into New Window* is not a
+  second workbench: VS Code opens it as `window.open("about:blank")`, so it loads no HTML and no
+  script tag of ours can be in it - and it copies the workbench's CSP across with `script-src`
+  rewritten to `'none'`, so none ever could. It also replaces that window's `document.createElement`
+  with a function that throws, deliberately, so `instanceof` keeps working across windows. So the
+  script stays in the main window and drives the other one: it learns of each window as it is opened,
+  sweeps its document too, and creates every element with the main document, which the other window
+  adopts on append. Those panels relay through the side panel in the main window, because an
+  auxiliary window has no sidebar of its own.
 
 ## The notes file
 
@@ -194,6 +221,41 @@ The prefix match earns its place: VS Code truncates a long tab caption with an e
 (`Claude capabilities over…`) in the label *and* in `aria-label`, with no untruncated copy anywhere in
 the DOM, so an exact comparison can never match a long title.
 
+The limit of resolving by caption: **two sessions with the same title resolve to the same session, and
+so share one note.** Nothing in the tab API can separate them - a `Tab` carries no id, and a webview
+tab's `input` is a `TabInputWebview` whose only member is a `viewType` identical for every Claude
+tab - so on that side the caption is genuinely all there is.
+
+In the DOM there *is* more, and it is where the row list comes from. VS Code stamps
+`data-resource-name` on every tab from the basename of its editor's resource, and a webview editor's
+resource is `webview-panel://webview-panel/webview-${providerId}-${resourceId}`, where `providerId`
+is the view type the extension asked for and `resourceId` is a uuid minted per editor. A Claude tab
+therefore reads `webview-claudeVSCodePanel-<uuid>`: **unique per tab**, readable while that tab is
+inactive, and carrying the same view type the extension matches on.
+
+So the injected script enumerates the Claude tabs itself and hands the list over - key, caption and
+active state per tab - and the extension turns each caption into a title and a note and sends rows
+back. **Double-clicking a row presses the tab that row names**, by key. Nothing is counted, no text is
+matched, and two sessions sharing a title are two rows that focus two different tabs. Three costs, all
+deliberate: the list is only as fresh as the one-second sweep, it only exists while the injection is
+live (an unpatched window shows the activation banner instead of a list), and its order follows the
+DOM rather than the editor API.
+
+That id is also **what a note is bound to**. A panel reports the id of the tab it lives in with every
+register and every save, and the extension gives each distinct tab its own distinct session out of the
+candidates the caption offers. So two sessions called *Fix the build* are two tabs with two notes,
+where before the lookup found two answers, refused to choose, and left both panels reporting *no
+session matches*. A claim outlives the caption that made it - a session renamed mid-flight keeps its
+note - and is released when that tab closes, freeing the session for a tab that reopens it.
+
+What the key is *not* is the Claude session id. That is not anywhere in the workbench DOM: it lives
+inside the Claude webview's own page, which is another origin, and in Claude's session files, which
+only the extension host can read - and Claude Code's extension exports nothing (`module.exports` is
+`{activate, deactivate}`), so its own session-to-panel map cannot be asked either. Nor can
+`data-resource-name` be read from the extension host, which is why the list is sourced from the DOM
+rather than from `vscode.window.tabGroups`. The caption remains how a session is *found* the first
+time; the tab id is what the binding is *kept* under.
+
 ## Commands
 
 | Command | Does |
@@ -220,9 +282,13 @@ npm run compile      # or: npm run watch
 Then press `F5` ("Run Extension") to launch an Extension Development Host.
 
 The injected payload is `media/ainotes-inject.js` (the script that runs in the workbench) and
-`media/ainotes-ui.html` (the page framed inside the Claude tab). Neither is compiled - the patch
+`media/ainotes-ui.html` (the loader framed inside the Claude tab). Neither is compiled - the patch
 copies them in as they are - so after editing either one, press **Patch VS Code** to reinstall them
 and restart. The buttons live behind the hamburger menu in the side panel.
+
+Editing the note pane itself - `media/pane/pane.css`, `pane.html`, `pane.js` - needs none of that. It
+is pushed from the extension at runtime, so reloading the extension host is enough in the development
+window, and a VS Code restart is enough anywhere else.
 
 Both halves log to the console with an `[AI Notes]` prefix: the injected script and the framed page to
 the **workbench** developer tools (Help → Toggle Developer Tools), the side panel to its own webview

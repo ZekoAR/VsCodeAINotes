@@ -3,8 +3,7 @@ import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import * as vscode from 'vscode';
-import { isClaudeTab } from './claudeTabs';
-import { NoteChange, NotesWorkspace } from './notesWorkspace';
+import { NoteChange, NotesWorkspace, SessionRow } from './notesWorkspace';
 
 /**
  * The comment the patch script leaves in `workbench.html`. Detection reads this; the scripts below
@@ -13,28 +12,31 @@ import { NoteChange, NotesWorkspace } from './notesWorkspace';
 const INJECT_MARKER = '<!-- AI Notes spike -->';
 
 /**
- * The session a tab caption names, matched against a scan already taken.
+ * The sessions a tab caption could name, best first, matched against a scan already taken.
  *
- * Returns the session rather than just its title, because the row needs its id as well - that is
- * what the note is read by.
+ * Returns every candidate rather than insisting on one, because the caller assigns them: two tabs
+ * with the same caption take one session each. Which is the whole point - a caption is not an
+ * identity, and Claude Code will happily give two sessions the same title.
  *
- * VS Code truncates a long caption with an ellipsis - `Claude capabilities over…` - so the exact
- * comparison only succeeds for captions short enough to have survived intact. The prefix pass covers
- * the rest, and insists on a unique hit: two sessions sharing an opening is a tie, and picking either
- * would be a guess.
+ * The two passes are treated differently on purpose. Titles that are EXACTLY equal are
+ * indistinguishable by definition, so all of them are offered and any one-to-one assignment is as
+ * good as another. A truncated caption - VS Code cuts a long one with an ellipsis, so
+ * `Claude capabilities over…` - is matched by prefix, and there the sessions ARE distinguishable:
+ * two different titles sharing an opening is a tie, and guessing would file a note against the
+ * wrong session. That still resolves to nothing.
  */
-function matchSession<T extends { label: string }>(caption: string, sessions: T[]): T | undefined {
+function matchSessions<T extends { label: string }>(caption: string, sessions: T[]): T[] {
 	const wanted = caption.trim();
-	const exact = sessions.find(session => session.label.trim() === wanted);
-	if (exact) {
+	const exact = sessions.filter(session => session.label.trim() === wanted);
+	if (exact.length > 0) {
 		return exact;
 	}
 	const stem = wanted.replace(/[….\s]+$/, '').trim();
 	if (!stem || stem === wanted) {
-		return undefined;
+		return [];
 	}
 	const hits = sessions.filter(session => session.label.trim().startsWith(stem));
-	return hits.length === 1 ? hits[0] : undefined;
+	return hits.length === 1 ? hits : [];
 }
 
 /**
@@ -45,6 +47,20 @@ function matchSession<T extends { label: string }>(caption: string, sessions: T[
  * save carry it again.
  */
 const ROW_NOTE_LIMIT = 4000;
+
+/** A ceiling on the reported tab list, matching the one the injected script applies. */
+const DOM_TAB_LIMIT = 200;
+
+/**
+* The loader version this extension's note pane needs.
+*
+* The pane - its markup, its styling and its behaviour - lives in `media/pane` and is pushed into
+* the framed page at runtime, so changing it reaches a Claude tab without re-patching VS Code. What
+* IS installed is the loader, `media/ainotes-ui.html`, and only a change to what the loader offers a
+* pane bumps this number. A panel reporting an older loader is told to update, exactly as a stale
+* payload is: an old loader cannot be trusted to run a newer pane.
+*/
+const PANE_LOADER = 1;
 
 /** Where the folder note's panel size and open state live - view state, so per machine. */
 const GENERAL_HEIGHT_KEY = 'ainotes.general.height';
@@ -65,13 +81,42 @@ type InboundMessage =
 	| { type: 'ready' }
 	| { type: 'spikePatch' }
 	| { type: 'spikeUnpatch' }
-	| { type: 'injectedRegister'; panel: string; caption: string; version?: string }
-	| { type: 'injectedSave'; panel: string; caption: string; text: string }
-	| { type: 'injectedHeight'; panel: string; caption: string; height: number }
+	| {
+			type: 'injectedRegister';
+			panel: string;
+			caption: string;
+			tabKey?: string;
+			version?: string;
+			loader?: number;
+	  }
+	| { type: 'injectedSave'; panel: string; caption: string; tabKey?: string; text: string }
+	| { type: 'injectedHeight'; panel: string; caption: string; tabKey?: string; height: number }
 	| { type: 'generalSave'; text: string }
 	| { type: 'generalHeight'; height: number }
 	| { type: 'generalOpen'; open: boolean }
+	| { type: 'injectedTabs'; tabs: Array<{ key: string; caption: string; active: boolean }> }
 	| { type: 'runInjector' };
+
+/** One open Claude tab, as the side panel lists it. */
+type TabRow = {
+	caption: string;
+	label: string;
+	note: string;
+	active: boolean;
+	/**
+	 * The tab this row IS, as VS Code names it.
+	 *
+	 * `data-resource-name` on the tab element, which for a webview editor is
+	 * `webview-<providedViewType>-<uuid>` - unique per editor, and the string the injected script
+	 * hands over with the list. It goes back down on a double click, so focusing presses that exact
+	 * tab: nothing is counted, and two sessions sharing a title are not a problem.
+	 *
+	 * Nothing here can invent it. No extension API exposes a webview tab's resource - a `Tab`
+	 * carries `label`, `group` and the flags, and a `TabInputWebview` carries only a `viewType`
+	 * identical for every Claude tab - which is why the list is sourced from the DOM at all.
+	 */
+	key: string;
+};
 
 /**
  * Copies `media/ainotes-inject.js` in as `ainotes.js` beside every `workbench.html` under
@@ -197,6 +242,27 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 		{ sessionId: string; noteId?: string; pushed: string }
 	>();
 
+	/** The Claude tabs the injected script last reported, in the order it walked the documents. */
+	private domTabs: Array<{ key: string; caption: string; active: boolean }> = [];
+	/** Whether a list has ever arrived, which is not the same as the list being empty. */
+	private domTabsSeen = false;
+	/** The pane files, read once. */
+	private pane: { css: string; html: string; js: string; revision: string } | undefined;
+	/** Which pane revision each panel has been given, so it is not pushed on every register. */
+	private readonly paneSent = new Map<string, string>();
+
+	/**
+	 * Which session each tab holds, by the tab's own unique id.
+	 *
+	 * The binding the whole feature rests on. A tab reports the id VS Code stamps on it, and that id
+	 * gets ONE session - so two tabs whose sessions share a title take one each instead of both
+	 * resolving to the same one, or, as before, to none at all.
+	 *
+	 * In memory only, and that is not laziness: the id is minted per editor, so a restored tab is a
+	 * new tab with a new id and nothing stored under the old one could be believed.
+	 */
+	private readonly claims = new Map<string, string>();
+
 	/**
 	 * `workspace` is absent in a window with no folder open. The provider is registered anyway: a
 	 * view whose provider never registers shows a loading bar for the lifetime of the window, so the
@@ -225,8 +291,6 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 				})
 			);
 		}
-		// The list is of OPEN Claude tabs, so it follows the tab state rather than the notes file.
-		this.disposables.push(vscode.window.tabGroups.onDidChangeTabs(() => this.postRows()));
 	}
 
 	resolveWebviewView(view: vscode.WebviewView): void {
@@ -257,9 +321,12 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 				case 'injectedRegister':
 					// A stale panel is offered the update instead of a note, so the version gate
 					// decides whether registering proceeds at all.
-					if (this.checkPayloadVersion(message.panel, message.version)) {
-						this.injectedRegister(message.panel, message.caption);
+					if (this.checkPayloadVersion(message.panel, message.version, message.loader)) {
+						this.injectedRegister(message.panel, message.caption, message.tabKey);
 					}
+					return;
+				case 'injectedTabs':
+					this.setDomTabs(message.tabs);
 					return;
 				case 'runInjector':
 					this.runSpike('Updating the injected script', SPIKE_PATCH_SCRIPT, () => {
@@ -270,10 +337,10 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 					});
 					return;
 				case 'injectedSave':
-					this.injectedSave(message.panel, message.caption, message.text);
+					this.injectedSave(message.panel, message.caption, message.text, message.tabKey);
 					return;
 				case 'injectedHeight':
-					this.injectedHeight(message.caption, message.height);
+					this.injectedHeight(message.caption, message.height, message.tabKey);
 					return;
 				case 'generalSave':
 					this.workspace?.setGeneralText(message.text, this);
@@ -295,30 +362,59 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 	}
 
 	/**
-	 * The open Claude tabs, in the order VS Code holds them.
+	 * The open Claude tabs, as the injected script last reported them.
 	 *
-	 * Captions, not sessions: this list is about what is on screen, and the caption is also the only
-	 * handle the injected script can use to find a tab in the DOM and focus it.
+	 * Sourced from the DOM rather than from `vscode.window.tabGroups`, because only the DOM has an
+	 * identity for a webview tab. Each row therefore carries the handle that presses that exact
+	 * tab, and focusing counts nothing and matches no text. Two costs, both accepted deliberately:
+	 * the list is only as fresh as the injected script's one-second sweep, and it only exists while
+	 * the injection is live - which is already the condition for showing a list at all, since an
+	 * unpatched window shows the activation banner in its place.
 	 */
-	private claudeTabRows(): Array<{
-		caption: string;
-		label: string;
-		note: string;
-		active: boolean;
-	}> {
-		const rows: Array<{ caption: string; label: string; note: string; active: boolean }> = [];
-		for (const group of vscode.window.tabGroups.all) {
-			for (const tab of group.tabs) {
-				if (isClaudeTab(tab)) {
-					// `caption` is what the tab actually shows, and stays on the row because focusing a
-					// tab means finding it in the DOM by that exact text. `label` is what the reader
-					// sees, and is the untruncated session title when one can be matched.
-					rows.push({ caption: tab.label, label: tab.label, note: '', active: tab.isActive });
-				}
-			}
-		}
+	private claudeTabRows(): TabRow[] {
+		// `caption` is what the tab actually shows; `label` is what the reader sees, and becomes
+		// the untruncated session title when one can be matched.
+		const rows: TabRow[] = this.domTabs.map(tab => ({
+			key: tab.key,
+			caption: tab.caption,
+			label: tab.caption,
+			note: '',
+			active: tab.active
+		}));
 		this.resolveRows(rows);
 		return rows;
+	}
+
+	/**
+	 * Take the tab list the injected script reported.
+	 *
+	 * Checked rather than trusted. It arrives through the webview relay, it decides what the panel
+	 * renders, and every distinct caption in it costs a session lookup - so a list that is not the
+	 * shape this expects is dropped whole rather than half-rendered, and said out loud in the log.
+	 */
+	private setDomTabs(tabs: Array<{ key: string; caption: string; active: boolean }>): void {
+		if (!Array.isArray(tabs) || tabs.length > DOM_TAB_LIMIT) {
+			this.trace(`ignored a tab list of ${Array.isArray(tabs) ? tabs.length : typeof tabs}`);
+			return;
+		}
+		const clean: Array<{ key: string; caption: string; active: boolean }> = [];
+		const seen = new Set<string>();
+		for (const tab of tabs) {
+			if (!tab || typeof tab.key !== 'string' || typeof tab.caption !== 'string') {
+				continue;
+			}
+			// A duplicate key cannot happen - the id is minted per editor - so if one arrives the
+			// assumption behind this whole list is wrong, and the second copy is not to be shown.
+			if (!tab.key || tab.key.length > 300 || tab.caption.length > 500 || seen.has(tab.key)) {
+				continue;
+			}
+			seen.add(tab.key);
+			clean.push({ key: tab.key, caption: tab.caption, active: Boolean(tab.active) });
+		}
+		this.domTabs = clean;
+		this.domTabsSeen = true;
+		this.releaseClosedTabs();
+		this.postRows();
 	}
 
 	/**
@@ -333,27 +429,27 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 	 * The note itself is read fresh every time, from the document already in memory. It changes on
 	 * exactly the events that bring us here, so caching it is the one thing that would be wrong.
 	 */
-	private resolveRows(
-		rows: Array<{ caption: string; label: string; note: string; active: boolean }>
-	): void {
+	private resolveRows(rows: TabRow[]): void {
 		const workspace = this.workspace;
 		if (!workspace || rows.length === 0) {
 			return;
 		}
-		const key = rows.map(row => row.caption).join(' ');
+		// Keyed by tab as well as caption: two tabs sharing a caption are two different bindings,
+		// and a cache keyed on captions alone would collapse them back into one.
+		const key = rows.map(row => `${row.key}\u001f${row.caption}`).join(' ');
 		if (key !== this.titleKey) {
 			this.titleKey = key;
 			this.matched = new Map();
 			const sessions = workspace.listSessions();
-			for (const caption of new Set(rows.map(row => row.caption))) {
-				const session = matchSession(caption, sessions);
+			for (const row of rows) {
+				const session = this.bindTab(row.key, row.caption, sessions);
 				if (session) {
-					this.matched.set(caption, { label: session.label, sessionId: session.id });
+					this.matched.set(row.key, { label: session.label, sessionId: session.id });
 				}
 			}
 		}
 		for (const row of rows) {
-			const match = this.matched.get(row.caption);
+			const match = this.matched.get(row.key);
 			row.label = match?.label || row.caption;
 			if (!match) {
 				continue;
@@ -390,6 +486,11 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 		void this.view.webview.postMessage({
 			type: 'rows',
 			rows: this.claudeTabRows(),
+			// "No tabs open" and "no list has arrived yet" are different facts, and only one of them
+			// is worth saying on screen. The list is reported by the injected script, so at startup -
+			// and for the whole life of an unpatched window - this is false and the panel says
+			// nothing about open tabs rather than claiming there are none.
+			listed: this.domTabsSeen,
 			noFolder: !this.workspace
 		});
 	}
@@ -403,6 +504,61 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 	 */
 	private payloadPath(name: string): string {
 		return vscode.Uri.joinPath(this.extensionUri, 'media', name).fsPath;
+	}
+
+	/**
+	 * The note pane, as text to be pushed into a framed page.
+	 *
+	 * Read from disk rather than compiled in, so the pane stays a css file, an html file and a js
+	 * file that can be read, linted and diffed. Cached behind their own hash, because a register
+	 * arrives per panel and can repeat while a panel is waiting to connect - and hashing three
+	 * small files is cheaper than reading them, but reading them once is cheaper still.
+	 */
+	private paneAssets(): { css: string; html: string; js: string; revision: string } | undefined {
+		if (this.pane) {
+			return this.pane;
+		}
+		try {
+			const read = (name: string) =>
+				readFileSync(vscode.Uri.joinPath(this.extensionUri, 'media', 'pane', name).fsPath, 'utf8');
+			const css = read('pane.css');
+			const html = read('pane.html');
+			const js = read('pane.js');
+			const revision = createHash('sha256').update(css).update(html).update(js).digest('hex').slice(0, 12);
+			this.pane = { css, html, js, revision };
+			this.trace(`pane assets read, revision ${revision}`);
+		} catch (err) {
+			// Nothing to draw with. Said out loud, because the panel would otherwise sit on the
+			// loader's "connecting" line with no reason given anywhere.
+			this.trace(`pane assets could not be read: ${err instanceof Error ? err.message : String(err)}`);
+			this.pane = undefined;
+		}
+		return this.pane;
+	}
+
+	/**
+	 * Hand a panel the pane to draw, once per revision.
+	 *
+	 * Sent before the note, so the pane exists to receive it. Repeats are cheap but not free - a
+	 * register repeats every few seconds while a panel is unresolved - so a panel already holding
+	 * this revision is left alone.
+	 */
+	private pushPane(panel: string): void {
+		const pane = this.paneAssets();
+		if (!pane || this.paneSent.get(panel) === pane.revision) {
+			return;
+		}
+		this.paneSent.set(panel, pane.revision);
+		this.trace(`pane ${pane.revision} -> panel ${panel}`);
+		void this.view?.webview.postMessage({
+			type: 'injectedUi',
+			panel,
+			css: pane.css,
+			html: pane.html,
+			js: pane.js,
+			revision: pane.revision,
+			needs: PANE_LOADER
+		});
 	}
 
 	/**
@@ -448,7 +604,20 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 	 * once it was installed by a build that knew how to stamp one.
 	 *
 	 */
-	private checkPayloadVersion(panel: string, reported: string | undefined): boolean {
+	private checkPayloadVersion(panel: string, reported: string | undefined, loader?: number): boolean {
+		// The loader is checked first and on its own terms: a payload can carry the right revision
+		// and still be running a loader too old for this pane, and that fails in the one way this
+		// whole mechanism exists to prevent - silently, with a pane that never appears.
+		if (typeof loader === 'number' && loader < PANE_LOADER) {
+			this.trace(`loader too old: panel reports ${loader}, pane needs ${PANE_LOADER}`);
+			void this.view?.webview.postMessage({
+				type: 'injectedStale',
+				panel,
+				installed: `loader ${loader}`,
+				expected: `loader ${PANE_LOADER}`
+			});
+			return false;
+		}
 		const stamped = reported && reported !== '__AINOTES_VERSION__' ? reported : undefined;
 		if (!stamped) {
 			if (!this.unstampedNoted) {
@@ -534,26 +703,17 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 	 * what `resolveSession` has always leaned on. A prefix that two sessions answer to resolves to
 	 * nothing rather than to a guess.
 	 */
-	private sessionForCaption(caption: string): string | undefined {
+	private sessionForTab(tabKey: string | undefined, caption: string): string | undefined {
 		const workspace = this.workspace;
 		if (!workspace) {
 			this.trace('  resolve: no workspace folder open');
 			return undefined;
 		}
-		const exact = workspace.sessionIdForLabel(caption);
-		if (exact) {
-			this.trace(`  resolve: exact caption match -> ${exact.slice(0, 8)}`);
-			return exact;
-		}
 		const sessions = workspace.listSessions();
-		const stem = caption.replace(/[….\s]+$/, '').trim();
-		if (stem && stem !== caption.trim()) {
-			const hits = sessions.filter(row => row.label.trim().startsWith(stem));
-			if (hits.length === 1) {
-				this.trace(`  resolve: prefix "${stem}" -> ${hits[0].id.slice(0, 8)}`);
-				return hits[0].id;
-			}
-			this.trace(`  resolve: prefix "${stem}" matched ${hits.length} sessions`);
+		const bound = this.bindTab(tabKey, caption, sessions);
+		if (bound) {
+			this.trace(`  resolve: tab ${tabKey ? tabKey.slice(-12) : '(no id)'} -> ${bound.id.slice(0, 8)} "${bound.label}"`);
+			return bound.id;
 		}
 		const sole = workspace.soleLiveSessionId();
 		if (sole) {
@@ -570,7 +730,53 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 		return undefined;
 	}
 
+	/**
+	 * The session this tab holds, claiming one if it has none yet.
+	 *
+	 * Order matters and is deliberate: an existing claim wins, so a tab keeps its session for as
+	 * long as it is open even if a session with the same title appears later. Otherwise the first
+	 * candidate no OTHER tab has claimed is taken, which is what makes two same-titled tabs land on
+	 * two different sessions. If every candidate is claimed - more tabs than sessions - the best
+	 * candidate is used anyway rather than leaving that panel with nothing, since sharing a note is
+	 * a better failure than refusing to save.
+	 */
+	private bindTab(tabKey: string | undefined, caption: string, sessions: SessionRow[]): SessionRow | undefined {
+		const claimed = tabKey ? this.claims.get(tabKey) : undefined;
+		if (claimed) {
+			const held = sessions.find(session => session.id === claimed);
+			if (held) {
+				return held;
+			}
+			// The session it held is gone from the scan; the claim is worthless, so it goes.
+			this.claims.delete(tabKey as string);
+		}
+		const candidates = matchSessions(caption, sessions);
+		if (candidates.length === 0) {
+			return undefined;
+		}
+		const taken = new Set(
+			[...this.claims.entries()].filter(([key]) => key !== tabKey).map(([, id]) => id)
+		);
+		const chosen = candidates.find(session => !taken.has(session.id)) ?? candidates[0];
+		if (tabKey) {
+			this.claims.set(tabKey, chosen.id);
+		}
+		return chosen;
+	}
+
+	/** Forget the claims of tabs that are no longer open, so their sessions are free again. */
+	private releaseClosedTabs(): void {
+		const open = new Set(this.domTabs.map(tab => tab.key));
+		for (const key of [...this.claims.keys()]) {
+			if (!open.has(key)) {
+				this.claims.delete(key);
+				this.trace(`released the claim of a closed tab ${key.slice(-12)}`);
+			}
+		}
+	}
+
 	private pushNotes(panel: string, sessionId: string): void {
+		this.pushPane(panel);
 		const noteId = this.workspace?.noteIdForSession(sessionId);
 		// The non-creating lookup: a panel appearing must not write an empty note into the file for
 		// every session anyone glances at. The note is created on the first save.
@@ -608,13 +814,14 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 	 * this webview reports ready, and on repeat for any panel still waiting, so registering twice
 	 * must cost nothing.
 	 */
-	private injectedRegister(panel: string, caption: string): void {
+	private injectedRegister(panel: string, caption: string, tabKey?: string): void {
 		// Acknowledged before anything can fail, so the log always shows the panel arriving even when
 		// resolving it does not work - "did the server see me at all" is the first question.
 		const again = this.registered.has(panel) ? ' (again)' : '';
 		this.trace(`ACK register${again} panel=${panel} caption="${caption}"`);
-		const sessionId = this.sessionForCaption(caption);
+		const sessionId = this.sessionForTab(tabKey, caption);
 		if (!sessionId) {
+			this.pushPane(panel);
 			this.pushError(
 				panel,
 				`no session matches "${caption}", and no single session is running in this folder`
@@ -639,8 +846,8 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 	 * Workspace state rather than the notes file: it is a per-machine view preference, and putting it
 	 * in the dot-file would make a window size a thing that shows up in a diff.
 	 */
-	private injectedHeight(caption: string, height: number): void {
-		const sessionId = this.sessionForCaption(caption);
+	private injectedHeight(caption: string, height: number, tabKey?: string): void {
+		const sessionId = this.sessionForTab(tabKey, caption);
 		if (!sessionId || !this.state || !Number.isFinite(height)) {
 			return;
 		}
@@ -648,9 +855,9 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 		this.trace(`height ${Math.round(height)}px remembered for ${sessionId.slice(0, 8)}`);
 	}
 
-	private injectedSave(panel: string, caption: string, text: string): void {
+	private injectedSave(panel: string, caption: string, text: string, tabKey?: string): void {
 		const known = this.registered.get(panel);
-		const sessionId = known?.sessionId ?? this.sessionForCaption(caption);
+		const sessionId = known?.sessionId ?? this.sessionForTab(tabKey, caption);
 		if (!sessionId || !this.workspace) {
 			this.pushError(panel, `nowhere to save: no session matches "${caption}"`);
 			return;

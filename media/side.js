@@ -133,6 +133,14 @@
 
 	/** True in a window with no folder open, where notes have nowhere to be stored. */
 	let noFolder = false;
+	/**
+	 * Whether a tab list has ever arrived, which is not the same as the list being empty.
+	 *
+	 * The list is reported by the injected script, so there is a moment at startup - and the whole
+	 * life of an unpatched window - where nothing is known about open tabs. Saying "No Claude Code
+	 * tabs open" then would be a claim this panel is in no position to make.
+	 */
+	let listed = false;
 
 	window.addEventListener('message', event => {
 		const message = event.data;
@@ -149,6 +157,12 @@
 			// across with its id intact and the answer is carried back.
 			// The link in a stale panel's banner, arriving the long way round: the framed page cannot
 			// reach the extension host, so it asks the injected script, which asks this webview.
+			if (message.kind === 'tabs') {
+				// The row list, straight from the workbench DOM. Only the extension can turn a
+				// caption into a session title and a note, so it goes up and comes back as rows.
+				vscode.postMessage({ type: 'injectedTabs', tabs: message.tabs || [] });
+				return;
+			}
 			if (message.kind === 'updateInjections') {
 				console.log('[AI Notes] side -> extension runInjector (from a panel)');
 				vscode.postMessage({ type: 'runInjector' });
@@ -164,6 +178,15 @@
 								: 'injectedSave',
 					panel: message.panel,
 					caption: message.caption,
+					// The id of the tab it lives in. Carried across untouched: nothing is decided here,
+					// and the extension binds the note to it.
+					tabKey: message.tabKey,
+					// Both halves of what the panel is RUNNING: the revision stamped into the injected
+					// payload, and what its loader can do for a pushed pane. Neither was carried before,
+					// and the effect was silent - the extension saw no revision, treated every panel as
+					// a development build, and the update offer could never appear.
+					version: message.version,
+					loader: message.loader,
 					text: message.text || '',
 					height: message.height
 				};
@@ -172,6 +195,20 @@
 				return;
 			}
 			showInjectBanner(message);
+			return;
+		}
+		if (message && message.type === 'injectedUi') {
+			// The note pane itself, on its way to a framed page. Carried across as text: only that
+			// document can run it, and it is the one place in this chain with no CSP to fight.
+			toInjected({
+				kind: 'ui',
+				panel: message.panel,
+				css: message.css,
+				html: message.html,
+				js: message.js,
+				revision: message.revision,
+				needs: message.needs
+			});
 			return;
 		}
 		if (message && (message.type === 'injectedNotes' || message.type === 'injectedError')) {
@@ -250,6 +287,7 @@
 		}
 		if (message && message.type === 'rows') {
 			sessions = message.rows || [];
+			listed = Boolean(message.listed);
 			noFolder = Boolean(message.noFolder);
 			render();
 		}
@@ -352,6 +390,10 @@
 	}
 
 	function render() {
+		if (sessions.length === 0 && !listed) {
+			rows.replaceChildren();
+			return;
+		}
 		if (sessions.length === 0) {
 			const none = document.createElement('div');
 			none.className = 'row-none';
@@ -372,7 +414,7 @@
 	 * workbench DOM, and the injected script is already in there, so a click on it is the one route
 	 * available. Best effort by nature, hence "try to focus".
 	 */
-	/** @param {{caption: string, label: string, note: string, active: boolean}} session */
+	/** @param {{key: string, caption: string, label: string, note: string, active: boolean}} session */
 	function makeRow(session) {
 		const row = document.createElement('div');
 		row.className = 'row' + (session.active ? ' noted' : '');
@@ -399,11 +441,11 @@
 		if (session.note && session.note.trim()) {
 			attachTip(row, session.note.trim());
 		}
-		row.addEventListener('dblclick', () => focusTab(session.caption));
+		row.addEventListener('dblclick', () => focusTab(session.key, session.caption));
 		row.addEventListener('keydown', event => {
 			if (event.key === 'Enter' || event.key === ' ') {
 				event.preventDefault();
-				focusTab(session.caption);
+				focusTab(session.key, session.caption);
 			}
 		});
 		return row;
@@ -452,8 +494,10 @@
 	}
 
 	/** Straight to the injected script: the extension host cannot activate a tab, but the DOM can. */
-	function focusTab(caption) {
-		toInjected({ kind: 'focusTab', caption });
+	function focusTab(key, caption) {
+		// The caption travels as well, as the fallback for a row whose tab has been closed and
+		// reopened since the list was built - a new editor gets a new key.
+		toInjected({ kind: 'focusTab', key, caption });
 	}
 
 	vscode.postMessage({ type: 'ready' });

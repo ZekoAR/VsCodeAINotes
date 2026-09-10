@@ -1,0 +1,16 @@
+<!-- The note pane's markup, pushed from the extension into the framed page at runtime.
+
+     The note first, its labels underneath: the same order as the Claude prompt, where the input is
+     what you look at and the metadata sits below it.
+
+     There is no `#stale` here any more. The states where the injection itself is wrong - a payload
+     older than the extension, files replaced but not yet loaded - belong to the loader, because they
+     are exactly the states where this pane may not be able to run at all. -->
+<div id="box">
+	<textarea id="text" placeholder="Notes for this Claude session..." spellcheck="false" disabled></textarea>
+	<div id="foot">
+		<span id="title">AI Notes</span>
+		<span id="session">loading...</span>
+		<span id="status"></span>
+	</div>
+</div>

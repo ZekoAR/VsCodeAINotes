@@ -261,6 +261,11 @@ export class NotesWorkspace implements vscode.Disposable {
 	 * the title read out of that same transcript. A caption that matches nothing, or that two
 	 * sessions answer to, resolves to nothing at all - the caller falls back to the picker rather
 	 * than filing a note against a guess.
+	 *
+	 * NOT the route a note panel takes any more, and deliberately so: refusing when two sessions
+	 * share a title left both of their panels unable to save. A panel identifies itself by the tab
+	 * it lives in, and `SidePanelProvider.bindTab` gives each tab its own session out of the
+	 * candidates `matchSessions` offers. This stays for callers that have one caption and no tab.
 	 */
 	sessionIdForLabel(label: string): string | undefined {
 		const wanted = label.trim();

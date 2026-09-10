@@ -31,6 +31,35 @@
 	/** How long a panel may go unanswered before it reports its own state to the console. */
 	const STUCK_AFTER_MS = 8000;
 	const CLAUDE_EXTENSION = 'Anthropic.claude-code';
+	/**
+	 * How a Claude tab names itself in the DOM.
+	 *
+	 * VS Code stamps `data-resource-name` on every tab from the basename of its editor's resource,
+	 * and a webview editor's resource is built as
+	 * `webview-panel://webview-panel/webview-${providerId}-${resourceId}` - where `providerId` is
+	 * the view type the extension asked for and `resourceId` is a uuid minted per editor. Read in
+	 * the shipped workbench, both the resource getter and the `providedId: e.providedViewType` that
+	 * feeds it.
+	 *
+	 * So a Claude tab's attribute reads `webview-claudeVSCodePanel-<uuid>`. Two things follow, and
+	 * both matter here: it identifies a tab AS a Claude tab, using the same view type the extension
+	 * matches on, and it is unique per tab. It is also on the tab element itself, so it is readable
+	 * while that tab is inactive - which nothing else about a webview editor is.
+	 *
+	 * It is NOT the Claude session id. The session id is not anywhere in this document: it lives
+	 * inside the Claude webview's own page, which is another origin, and in Claude's session files,
+	 * which only the extension host can read. The caption remains the only bridge to a session.
+	 */
+	const CLAUDE_TAB_RESOURCE = 'claudeVSCodePanel';
+	/** Every Claude tab in a document, in the order that document holds them. */
+	const TAB_SELECTOR = `.tab[data-resource-name*="${CLAUDE_TAB_RESOURCE}"]`;
+	/**
+	 * A ceiling on the reported list.
+	 *
+	 * It crosses to the extension, where every caption becomes a session lookup, so a pathological
+	 * document must not be able to turn one sweep into a thousand of them.
+	 */
+	const TAB_LIMIT = 200;
 	const NOTES_EXTENSION = 'arcticrobots.ainotes';
 	/** Marks a container already fitted, so the poll never doubles up. */
 	const MARK = 'ainotesAnchored';
@@ -40,8 +69,124 @@
 	const SPLITBAR_PX = 4;
 	const PANEL_MIN = 80;
 
+	/**
+	 * Our framed page, resolved once and absolutely.
+	 *
+	 * A relative `./ainotes-ui.html` is resolved against the document holding the frame, and that
+	 * document can be an auxiliary window whose url is `about:blank` rather than this directory. The
+	 * patch copies the file in beside `workbench.html`, and `frame-src 'self' vscode-webview:`
+	 * allows it in both windows: an auxiliary window gets a copy of this CSP with only `script-src`
+	 * rewritten.
+	 */
+	const UI_URL = new URL('./ainotes-ui.html', location.href).href;
+
 	/** Every panel this script built: {id, overlay, frame, connected, lastRegister}. */
 	const panels = [];
+
+	/**
+	 * The auxiliary windows this workbench has opened - the windows "Move Editor into New Window"
+	 * makes.
+	 *
+	 * They are why this file is written against a SET of documents rather than one, and three facts
+	 * read out of the shipped workbench decide how it treats them. From `createContainer` in
+	 * `workbench.desktop.main.js`:
+	 *
+	 *   - an auxiliary window is `window.open("about:blank", ...)`, so it loads no html and no
+	 *     script tag of ours can ever be in it;
+	 *   - `e.document.createElement` is REPLACED there with a function that throws, on purpose, so
+	 *     that `x instanceof HTMLElement` keeps working across windows. So every element below is
+	 *     created with THIS document and appended into the other one, which adopts it;
+	 *   - the workbench CSP meta is copied across with `script-src` rewritten to `'none'`, so
+	 *     putting a script of our own in there is not merely awkward, it is forbidden.
+	 *
+	 * And from the webview code: the overlay container is appended to
+	 * `layoutService.getContainer(this.window)`, the window the editor is currently in. A moved
+	 * editor's Claude frame therefore sits in a document this script has to go looking for.
+	 */
+	const auxWindows = [];
+
+	/**
+	 * Whether this node is still in a document belonging to a window that is still open.
+	 *
+	 * `document.contains` was the test until an editor could be in another window: it answers "is it
+	 * in THIS document", which is false for a panel that is alive and on screen elsewhere.
+	 * `isConnected` alone is not enough either - a closed popup's nodes stay connected to a document
+	 * nobody can see - so the owning window is checked too.
+	 */
+	function isLive(node) {
+		if (!node || !node.isConnected) {
+			return false;
+		}
+		const win = node.ownerDocument && node.ownerDocument.defaultView;
+		if (!win) {
+			return false;
+		}
+		try {
+			return !win.closed;
+		} catch {
+			return false;
+		}
+	}
+
+	/** VS Code stamps `vscodeWindowId` on every window it opens. Logged, so a report says where. */
+	function windowIdOf(node) {
+		try {
+			const win = node && node.ownerDocument && node.ownerDocument.defaultView;
+			return win ? win.vscodeWindowId : null;
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * The windows to sweep: this one, plus every auxiliary window still open and still ours.
+	 *
+	 * Closed and unreachable ones are dropped here rather than in a pass of their own, because this
+	 * is the only place that has to touch them to find out.
+	 */
+	function liveViews() {
+		const views = [{ win: window, doc: document }];
+		for (let i = auxWindows.length - 1; i >= 0; i--) {
+			const win = auxWindows[i];
+			let doc = null;
+			try {
+				doc = win.closed ? null : win.document;
+			} catch {
+				// A popup that has navigated somewhere cross-origin: reading its document throws.
+				// It cannot be one of ours, so it goes, rather than throwing again every second.
+				doc = null;
+			}
+			if (!doc) {
+				auxWindows.splice(i, 1);
+				console.log(`${TAG} auxiliary window gone, ${auxWindows.length} left`);
+				continue;
+			}
+			// Inserted rather than appended: the walk above runs backwards so it can splice out a
+			// dead window, and appending would hand back the auxiliary windows in reverse. The row
+			// list is built from this order, and a list that reshuffled itself between sweeps would
+			// read as tabs jumping about.
+			views.splice(1, 0, { win, doc });
+		}
+		return views;
+	}
+
+	/** Take an opened window under this script's care, once. */
+	function adoptWindow(win) {
+		if (auxWindows.indexOf(win) !== -1) {
+			return;
+		}
+		try {
+			// Our framed page posts to `parent`, and for a panel in an auxiliary window that is the
+			// auxiliary window, not this one, so the same handler has to listen there as well.
+			// Allowed because the popup is `about:blank` opened from here and so shares our origin.
+			win.addEventListener('message', onMessage);
+		} catch (err) {
+			console.warn(`${TAG} not adopting a window we cannot listen to`, err);
+			return;
+		}
+		auxWindows.push(win);
+		console.log(`${TAG} adopted auxiliary window ${win.vscodeWindowId}, ${auxWindows.length} total`);
+	}
 
 	/** The `extensionId` VS Code puts in a webview iframe's src, or nothing if it is not a webview. */
 	function paramOf(iframe, name) {
@@ -52,9 +197,9 @@
 		}
 	}
 
-	function iframesFor(extensionId) {
+	function iframesFor(doc, extensionId) {
 		const out = [];
-		for (const frame of document.querySelectorAll('iframe.webview')) {
+		for (const frame of doc.querySelectorAll('iframe.webview')) {
 			if (paramOf(frame, 'extensionId') === extensionId) {
 				out.push(frame);
 			}
@@ -82,7 +227,9 @@
 	 */
 	function toSidePanel(payload) {
 		const targets = [];
-		for (const frame of iframesFor(NOTES_EXTENSION)) {
+		// This document, always: the side panel is a view in the main window, and a panel in an
+		// auxiliary window has no sidebar of its own to talk to.
+		for (const frame of iframesFor(document, NOTES_EXTENSION)) {
 			const win = frame.contentWindow;
 			if (!win) {
 				continue;
@@ -126,17 +273,59 @@
 	 * hence returning null rather than guessing, so a miss reports "no caption" instead of reading
 	 * some other tab.
 	 */
-	function captionFor(overlay) {
+	/**
+	 * A tab's own text.
+	 *
+	 * The same element `captionFor` reads, without its fallbacks: this is for a tab found in the DOM
+	 * rather than resolved from a container, where there is no editor group to disambiguate an
+	 * `aria-label` against.
+	 */
+	function labelOf(tab) {
+		const label = tab.querySelector('.label-name');
+		return ((label && label.textContent) || '').trim();
+	}
+
+	function tabFor(overlay) {
 		const anchor = overlay.style.getPropertyValue('position-anchor');
 		if (!anchor) {
 			return null;
 		}
+		// The overlay's OWN document, not this one: a container in an auxiliary window carries its
+		// anchor element and its editor group there, and looking here would find neither.
+		const doc = overlay.ownerDocument;
 		const target = Array.prototype.find.call(
-			document.querySelectorAll('[style*="anchor-name"]'),
+			doc.querySelectorAll('[style*="anchor-name"]'),
 			el => el.style.getPropertyValue('anchor-name') === anchor
 		);
 		const group = target && target.closest('.editor-group-container');
-		const tab = group && group.querySelector('.tab.active');
+		// The active tab, or the group's title control when the group has no tab bar at all, which
+		// is a shape an editor moved into its own window can take. Guarded on there being no tab
+		// rather than no ACTIVE tab: with a tab bar present, the title control's `.label-name` is
+		// the first tab's label, and a confidently wrong caption is worse than none.
+		const tab =
+			(group && group.querySelector('.tab.active')) ||
+			(group && !group.querySelector('.tab') && group.querySelector('.title'));
+		return tab || null;
+	}
+
+	/**
+	 * The unique id of the tab this panel lives in.
+	 *
+	 * `data-resource-name`, which VS Code sets from the basename of that editor's resource:
+	 * `webview-claudeVSCodePanel-<uuid>`, minted per editor. It is what the extension binds the note
+	 * to, so two sessions carrying the same title are two bindings rather than one ambiguous lookup
+	 * that resolves to neither.
+	 *
+	 * Read through the same walk as the caption, so it names the same tab the caption came from -
+	 * they must agree or the binding would be filed against the wrong session.
+	 */
+	function tabKeyFor(overlay) {
+		const tab = tabFor(overlay);
+		return (tab && tab.getAttribute('data-resource-name')) || null;
+	}
+
+	function captionFor(overlay) {
+		const tab = tabFor(overlay);
 		if (!tab) {
 			return null;
 		}
@@ -166,12 +355,17 @@
 		// Remembered so the sweep can notice the caption changing under a container VS Code reused
 		// for a different session - otherwise that panel would keep showing the previous note.
 		entry.caption = caption;
+		// The tab's own id travels with the caption, and is what the note is bound to. The caption
+		// stays because it is how a session is FOUND the first time - the id means nothing to Claude.
+		entry.tabKey = tabKeyFor(entry.overlay);
 		const sent = toSidePanel({
 			source: 'ainotes-inject',
 			kind: 'register',
 			panel: entry.id,
 			caption,
-			version: VERSION
+			tabKey: entry.tabKey,
+			version: VERSION,
+			loader: entry.loader
 		});
 		if (!sent) {
 			// Nothing to talk to. The AI Notes view is resolved lazily, so in a window where it has
@@ -224,37 +418,111 @@
 	}
 
 	/**
-	 * Bring a Claude tab to the front by clicking its header.
+	 * Claude's own tabs, in the order the documents hold them.
 	 *
-	 * There is no API for activating an arbitrary tab - `Tab` exposes `isActive` and no way to set
-	 * it - so the side panel asks this script instead, because the tab header is an ordinary element
-	 * in the workbench DOM and a click on it is what a reader would do anyway.
-	 *
-	 * Matched on the label element's own text, the same source `captionFor` reads, so a caption that
-	 * came from the extension's tab list matches what is on screen. Reported either way: a silent
-	 * miss here would look like a dead double click.
+	 * This is the row list the side panel shows, and it is built here rather than in the extension
+	 * because only the DOM has an identity for a webview tab: `data-resource-name` is unique per
+	 * editor and no extension API exposes it. A row that carries it can be focused exactly, with
+	 * nothing counted and nothing guessed. A tab is listed whether or not its webview has been
+	 * created, because the attribute is on the tab element itself.
 	 */
-	function focusTab(caption) {
-		if (!caption) {
+	function claudeTabs() {
+		const out = [];
+		for (const view of liveViews()) {
+			for (const tab of view.doc.querySelectorAll(TAB_SELECTOR)) {
+				if (out.length >= TAB_LIMIT) {
+					console.warn(`${TAG} more than ${TAB_LIMIT} Claude tabs, reporting the first`);
+					return out;
+				}
+				out.push({
+					key: tab.getAttribute('data-resource-name'),
+					caption: labelOf(tab),
+					active: tab.classList.contains('active'),
+					window: view.win.vscodeWindowId
+				});
+			}
+		}
+		return out;
+	}
+
+	/** The last list handed over, flattened, so an unchanged list is not sent every second. */
+	let lastTabs = null;
+
+	/**
+	 * Hand the tab list over when it has changed.
+	 *
+	 * `force` is for the moment the side panel announces itself: it has just rendered and holds no
+	 * list, and what this script sent to a webview that did not exist yet is no reason to stay
+	 * quiet now.
+	 */
+	function reportTabs(force) {
+		const tabs = claudeTabs();
+		const signature = tabs.map(t => `${t.key}${t.caption}${t.active}`).join('');
+		if (!force && signature === lastTabs) {
 			return;
 		}
-		for (const label of document.querySelectorAll('.tab .label-name')) {
-			if ((label.textContent || '').trim() !== caption.trim()) {
-				continue;
-			}
-			const tab = label.closest('.tab');
-			if (tab) {
-				pressElement(tab);
-				// Measured after the press, and on the element that exists then: activating a tab
-				// makes VS Code restyle and can move it, so a rectangle taken beforehand may be the
-				// wrong one by the time the overlay is drawn.
-				flashElement(tab);
-				console.log(`${TAG} focused tab`, caption);
-				return;
+		const sent = toSidePanel({ source: 'ainotes-inject', kind: 'tabs', tabs });
+		// Only counted as sent when it went somewhere. Remembering a list that could not be
+		// delivered would leave the panel empty until the next time a tab happened to change.
+		lastTabs = sent ? signature : null;
+	}
+
+	/** The first Claude tab, in any window, that a test accepts. */
+	function findTab(accept) {
+		for (const view of liveViews()) {
+			for (const tab of view.doc.querySelectorAll(TAB_SELECTOR)) {
+				if (accept(tab)) {
+					return { view, tab };
+				}
 			}
 		}
-		console.warn(`${TAG} no tab found to focus`, caption);
+		return null;
 	}
+
+	/**
+	 * Bring one Claude tab to the front, named by the key its row was built with.
+	 *
+	 * Exact, and nothing is counted: the key is that tab's own `data-resource-name`, unique per
+	 * editor, and it came from this document in the first place. Two sessions sharing a title are
+	 * no longer a problem here, and neither is the order the extension holds its tab groups in.
+	 *
+	 * There is no API for activating an arbitrary tab - `Tab` exposes `isActive` and no way to set
+	 * it - so the tab header is pressed the way a mouse would, which is what `pressElement` is for.
+	 */
+	function focusTab(key, caption) {
+		let hit = key ? findTab(tab => tab.getAttribute('data-resource-name') === key) : null;
+		if (!hit && caption) {
+			// The key names no tab any more: the editor was closed and reopened, and a new editor
+			// gets a new id - or this row is older than the sweep that would have refreshed it. The
+			// caption is the weaker handle, since it can name more than one tab, but pressing the
+			// first tab carrying it beats doing nothing.
+			hit = findTab(tab => labelOf(tab) === caption.trim());
+			if (hit) {
+				console.warn(`${TAG} no tab carries ${key}, fell back to the caption`, caption);
+			}
+		}
+		if (!hit) {
+			console.warn(`${TAG} no tab found to focus`, key || caption);
+			return;
+		}
+		const tab = hit.tab;
+		if (hit.view.win !== window) {
+			// Raising the tab without raising the window it is in would look like the double click
+			// did nothing at all.
+			try {
+				hit.view.win.focus();
+			} catch (err) {
+				console.warn(`${TAG} could not raise the window holding the tab`, err);
+			}
+		}
+		pressElement(tab);
+		// Measured after the press, and on the element that exists then: activating a tab makes VS
+		// Code restyle and can move it, so a rectangle taken beforehand may be the wrong one by the
+		// time the overlay is drawn.
+		flashElement(tab);
+		console.log(`${TAG} focused tab`, caption, 'in window', windowIdOf(tab), key);
+	}
+
 
 	/**
 	 * Press an element the way a mouse would.
@@ -270,7 +538,11 @@
 		const common = {
 			bubbles: true,
 			cancelable: true,
-			view: window,
+			// The element's own window, so a handler reading `view` is not told the wrong one. The
+			// event CONSTRUCTORS stay this window's on purpose: the workbench forces element
+			// creation through the main window precisely so its `instanceof` checks keep working,
+			// and its handlers test against these same constructors.
+			view: el.ownerDocument.defaultView || window,
 			button: 0,
 			clientX: Math.round(box.left + box.width / 2),
 			clientY: Math.round(box.top + box.height / 2)
@@ -297,10 +569,12 @@
 	}
 
 	/** The keyframes the flash uses, added once. The workbench CSP allows `style-src 'unsafe-inline'`. */
-	function ensureFlashStyle() {
-		if (document.getElementById('ainotes-flash-style')) {
+	function ensureFlashStyle(doc) {
+		if (doc.getElementById('ainotes-flash-style')) {
 			return;
 		}
+		// Created with THIS document even when it is bound for another window's head: an auxiliary
+		// window's own `createElement` throws by design, and appending adopts the node anyway.
 		const style = document.createElement('style');
 		style.id = 'ainotes-flash-style';
 		// `textContent` on a style element, not `innerHTML`: this document enforces Trusted Types.
@@ -309,7 +583,7 @@
 			'0% { background-color: transparent }' +
 			'40% { background-color: rgba(201, 100, 66, 0.9) }' +
 			'100% { background-color: transparent } }';
-		document.head.appendChild(style);
+		doc.head.appendChild(style);
 	}
 
 	/**
@@ -329,7 +603,8 @@
 	 * context, and `pointer-events: none` so it cannot intercept anything during its 600ms.
 	 */
 	function flashElement(el) {
-		ensureFlashStyle();
+		const doc = el.ownerDocument;
+		ensureFlashStyle(doc);
 		const box = el.getBoundingClientRect();
 		if (!box.width || !box.height) {
 			return;
@@ -347,7 +622,7 @@
 			'z-index:1000',
 			'animation:ainotes-flash 200ms ease-in-out 3'
 		].join(';');
-		document.body.appendChild(flash);
+		doc.body.appendChild(flash);
 		const done = () => flash.remove();
 		flash.addEventListener('animationend', done, { once: true });
 		// A flash left on screen would be worse than no flash, so its removal does not depend on an
@@ -357,7 +632,7 @@
 
 	function panelFor(id) {
 		const matches = panels.filter(entry => entry.id === id);
-		return matches.find(entry => document.contains(entry.frame)) || matches[0] || null;
+		return matches.find(entry => isLive(entry.frame)) || matches[0] || null;
 	}
 
 	/**
@@ -409,7 +684,7 @@
 		// The panel's id travels in the url and comes back on every message, so routing never depends
 		// on comparing `event.source` to `frame.contentWindow` - that comparison silently matched
 		// nothing here, and a dropped message is indistinguishable from a slow one.
-		frame.src = './ainotes-ui.html?panel=' + encodeURIComponent(panelId);
+		frame.src = UI_URL + '?panel=' + encodeURIComponent(panelId);
 		frame.style.cssText = 'flex:1 1 auto;border:none;width:100%;height:100%';
 
 		// Transparent at rest, so it does not draw a line across the tab, but still taking its space
@@ -516,7 +791,14 @@
 		if (!caption) {
 			return;
 		}
-		toSidePanel({ source: 'ainotes-inject', kind: 'height', panel: entry.id, caption, height });
+		toSidePanel({
+			source: 'ainotes-inject',
+			kind: 'height',
+			panel: entry.id,
+			caption,
+			tabKey: tabKeyFor(entry.overlay) || entry.tabKey,
+			height
+		});
 	}
 
 	function addControls(overlay) {
@@ -528,6 +810,13 @@
 				forget(i, 'replaced by a new panel with the same id');
 			}
 		}
+		// Anything of ours already inside this container is a leftover: a container VS Code moved
+		// between windows brings our button and panel with it, and a second set would mean two
+		// buttons and a frame nobody is listening to. Removed rather than reused, so the entry and
+		// the DOM cannot disagree about which panel is the live one.
+		for (const old of overlay.querySelectorAll('#ainotes-anchor-button, #ainotes-panel')) {
+			old.remove();
+		}
 		const { panel, frame, splitbar } = buildPanel(panelId);
 		const entry = {
 			id: panelId,
@@ -537,6 +826,8 @@
 			stale: false,
 			lastRegister: 0,
 			caption: null,
+			tabKey: null,
+			loader: null,
 			born: Date.now(),
 			diagnosed: false,
 			height: PANEL_HEIGHT
@@ -589,10 +880,10 @@
 		});
 
 		overlay.append(button, panel);
-		console.log(`${TAG} panel added to Claude tab`, panelId);
+		console.log(`${TAG} panel added to Claude tab`, panelId, 'in window', windowIdOf(overlay));
 	}
 
-	window.addEventListener('message', event => {
+	function onMessage(event) {
 		const data = event.data;
 		if (!data || typeof data !== 'object') {
 			return;
@@ -606,6 +897,11 @@
 				return;
 			}
 			if (data.kind === 'ready') {
+				// The loader reports what it can run for a pushed pane. Remembered on the entry so
+				// every later registration carries it too, including the sweep's retries.
+				if (typeof data.loader === 'number') {
+					entry.loader = data.loader;
+				}
 				register(entry);
 			} else if (data.kind === 'updateInjections') {
 				// The banner link in a stale panel. Passed straight through - deciding what "update"
@@ -626,6 +922,7 @@
 					kind: 'save',
 					panel: entry.id,
 					caption,
+					tabKey: tabKeyFor(entry.overlay) || entry.tabKey,
 					text: data.text || ''
 				});
 				if (!sent) {
@@ -653,10 +950,11 @@
 			for (const entry of panels) {
 				register(entry);
 			}
+			reportTabs(true);
 			return;
 		}
 		if (data.kind === 'focusTab') {
-			focusTab(data.caption);
+			focusTab(data.key, data.caption);
 			return;
 		}
 		if (data.kind === 'patched') {
@@ -680,6 +978,17 @@
 			toFrame(entry, { kind: 'stale', installed: data.installed, expected: data.expected });
 			return;
 		}
+		if (data.kind === 'ui') {
+			toFrame(entry, {
+				kind: 'ui',
+				css: data.css,
+				html: data.html,
+				js: data.js,
+				revision: data.revision,
+				needs: data.needs
+			});
+			return;
+		}
 		if (data.kind === 'notes') {
 			entry.connected = true;
 			entry.diagnosed = false;
@@ -699,7 +1008,9 @@
 			entry.connected = false;
 			toFrame(entry, { kind: 'error', problem: data.problem });
 		}
-	});
+	}
+
+	window.addEventListener('message', onMessage);
 
 	/** Forget a panel, by index, saying why. */
 	function forget(index, why) {
@@ -713,30 +1024,37 @@
 			// Pruned BEFORE anything is added, so a reopened tab cannot be matched against the entry
 			// its closed predecessor left behind.
 			for (let i = panels.length - 1; i >= 0; i--) {
-				if (!document.contains(panels[i].overlay)) {
-					forget(i, 'its tab is gone');
-				} else if (!document.contains(panels[i].frame)) {
-					// The container survived but VS Code emptied it. The mark below is cleared too, so
-					// the pass that follows rebuilds the panel rather than leaving the tab bare.
-					delete panels[i].overlay.dataset[MARK];
-					forget(i, 'its frame was removed from a container that stayed');
+				if (isLive(panels[i].overlay) && isLive(panels[i].frame)) {
+					continue;
 				}
+				// The mark goes with the entry, in both cases. It is the thing that stops a
+				// container being fitted twice, so leaving it set on a container we have just given
+				// up on would leave that tab bare for good - and a container is not only emptied,
+				// it can also be moved to another window, which is a disconnect we would otherwise
+				// never recover from.
+				const reason = isLive(panels[i].overlay)
+					? 'its frame was removed from a container that stayed'
+					: 'its tab is gone';
+				delete panels[i].overlay.dataset[MARK];
+				forget(i, reason);
 			}
 
-			for (const frame of iframesFor(CLAUDE_EXTENSION)) {
-				if (isDockedView(frame)) {
-					continue;
-				}
-				const overlay = frame.closest('.webview-overlay-content');
-				if (!overlay) {
-					continue;
-				}
-				// Re-applied every pass, not just once: if VS Code reasserts its own inline styles on
-				// a layout, the column would silently collapse back and the panel would overlap again.
-				fit(overlay, frame);
-				if (!overlay.dataset[MARK]) {
-					overlay.dataset[MARK] = '1';
-					addControls(overlay);
+			for (const view of liveViews()) {
+				for (const frame of iframesFor(view.doc, CLAUDE_EXTENSION)) {
+					if (isDockedView(frame)) {
+						continue;
+					}
+					const overlay = frame.closest('.webview-overlay-content');
+					if (!overlay) {
+						continue;
+					}
+					// Re-applied every pass, not just once: if VS Code reasserts its own inline styles on
+					// a layout, the column would silently collapse back and the panel would overlap again.
+					fit(overlay, frame);
+					if (!overlay.dataset[MARK]) {
+						overlay.dataset[MARK] = '1';
+						addControls(overlay);
+					}
 				}
 			}
 
@@ -761,10 +1079,11 @@
 						console.warn(`${TAG} panel stuck, state follows`, {
 							panel: entry.id,
 							caption: captionFor(entry.overlay),
-							overlayInDocument: document.contains(entry.overlay),
-							frameInDocument: document.contains(entry.frame),
+							window: windowIdOf(entry.overlay),
+							overlayLive: isLive(entry.overlay),
+							frameLive: isLive(entry.frame),
 							frameWindow: Boolean(entry.frame.contentWindow),
-							sidePanelFrames: iframesFor(NOTES_EXTENSION).length,
+							sidePanelFrames: iframesFor(document, NOTES_EXTENSION).length,
 							secondsWaiting: Math.round((now - entry.born) / 1000)
 						});
 					}
@@ -776,6 +1095,9 @@
 					register(entry);
 				}
 			}
+
+			// Last, so a tab that appeared this pass is reported together with the panel it got.
+			reportTabs(false);
 		} catch (err) {
 			// Stop rather than repeat the same throw every second for the life of the window.
 			clearInterval(timer);
@@ -783,8 +1105,32 @@
 		}
 	}
 
+	/**
+	 * Learn about auxiliary windows as they are opened.
+	 *
+	 * There is no way to enumerate them: the workbench keeps the handles to itself and no DOM in
+	 * this window refers to them. But it opens them with `pt.open(...)`, and `var pt = window` in
+	 * the shipped bundle - read there, not assumed - so this is the very property lookup it
+	 * performs. Called through first and unconditionally, so a blocked popup still returns exactly
+	 * what the workbench expects and nothing here can cost it a window.
+	 */
+	const nativeOpen = window.open;
+	window.open = function () {
+		const child = nativeOpen.apply(this, arguments);
+		try {
+			if (child && child !== window) {
+				adoptWindow(child);
+			}
+		} catch (err) {
+			console.warn(`${TAG} could not adopt an opened window`, err);
+		}
+		return child;
+	};
+
 	sweep();
 	timer = setInterval(sweep, POLL_MS);
 
-	console.log(`${TAG} injected payload ${VERSION}, polling every ${POLL_MS}ms`);
+	console.log(
+		`${TAG} injected payload ${VERSION}, polling every ${POLL_MS}ms, watching for auxiliary windows`
+	);
 })();

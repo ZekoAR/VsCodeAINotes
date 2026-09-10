@@ -4,8 +4,9 @@
 <meta charset="UTF-8">
 <title>AI Notes</title>
 <style>
-	/* Its own document, not a webview, so none of VS Code's --vscode-* theme variables exist here.
-	   The colours are hard-coded against the dark theme until we decide how theming reaches this. */
+	/* Only what the loader itself draws. Everything the note pane looks like arrives from the
+	   extension at runtime, so a change to the pane never touches this file - and this file is the
+	   one that costs a patch and a VS Code restart to replace. */
 	html, body {
 		height: 100%;
 		margin: 0;
@@ -17,96 +18,9 @@
 		color: #ddd;
 		font: 12px/1.5 "Segoe UI", sans-serif;
 	}
-	/* The note and its footer sit in one rounded, padded box, the way the Claude prompt input does.
-	   The border is on the box rather than the textarea so that focus lights the whole thing. */
-	#box {
-		flex: 1 1 auto;
-		min-height: 0;
-		display: flex;
-		flex-direction: column;
-		box-sizing: border-box;
-		/* 2px at the top: the splitbar sits directly above this frame, and the gap between the two is
-		   this margin. The sides and bottom keep their breathing room. */
-		margin: 2px 8px 8px;
-		padding: 6px 8px 4px;
-		border: 1px solid #3a3a3a;
-		border-radius: 10px;
-		background: #232323;
-		transition: border-color 120ms ease;
-	}
-	/* `focus-within`, not `textarea:focus`: the highlight belongs to the container the reader sees
-	   as one control, and the focus actually lands on the textarea inside it. */
-	#box:focus-within {
-		border-color: #c96442;
-	}
-	textarea {
-		flex: 1 1 auto;
-		min-height: 0;
-		padding: 2px 2px 4px;
-		border: none;
-		outline: none;
-		resize: none;
-		background: transparent;
-		color: #e6e6e6;
-		font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
-	}
-	textarea:disabled {
-		color: #6f6f6f;
-	}
-	textarea::placeholder {
-		color: #6a6a6a;
-	}
-	/* VS Code's scrollbar colours, hard-coded: this is a plain document at the workbench origin, not
-	   a webview, so `--vscode-scrollbarSlider-*` does not exist here. Narrower than VS Code's 10px
-	   and rounded at the ends, which is a deliberate departure - the panel is a small box inside a
-	   tab, and a full-width square slider reads as heavier than everything around it. */
-	::-webkit-scrollbar {
-		width: 8px;
-		height: 8px;
-	}
-	::-webkit-scrollbar-track,
-	::-webkit-scrollbar-corner {
-		background: transparent;
-	}
-	::-webkit-scrollbar-thumb {
-		border-radius: 4px;
-		background: rgba(121, 121, 121, 0.4);
-	}
-	::-webkit-scrollbar-thumb:hover {
-		background: rgba(100, 100, 100, 0.7);
-	}
-	::-webkit-scrollbar-thumb:active {
-		background: rgba(191, 191, 191, 0.4);
-	}
-	/* Below the note, like the row of controls under the Claude prompt. */
-	#foot {
-		flex: 0 0 auto;
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding-top: 2px;
-		font-size: 11px;
-		line-height: 18px;
-	}
-	#title {
-		color: #b8b8b8;
-		font-weight: 600;
-	}
-	#session {
-		color: #7a7a7a;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-	#status {
-		margin-left: auto;
-		flex: 0 0 auto;
-		color: #6f6f6f;
-	}
-	/* Only a failure is coloured. A note loading or saving is the expected case and should not
-	   compete with the note for attention. */
-	#status.bad { color: #e06c5c; }
-	#stale {
+	/* The loader's own surface: what is shown before a pane arrives, and instead of one when it
+	   cannot run. */
+	#ainotes-boot {
 		flex: 1 1 auto;
 		min-height: 0;
 		margin: 8px;
@@ -116,197 +30,183 @@
 		background: #232323;
 		line-height: 1.6;
 	}
-	#stale a {
+	#ainotes-boot a {
 		color: #6cb6ff;
 		cursor: pointer;
 		text-decoration: underline;
 	}
-	#stale .detail {
+	#ainotes-boot .detail {
 		margin-top: 6px;
 		opacity: 0.65;
+	}
+	#ainotes-root {
+		flex: 1 1 auto;
+		min-height: 0;
+		display: none;
+		flex-direction: column;
 	}
 </style>
 </head>
 <body>
-	<!-- The note first, its labels underneath: the same order as the Claude prompt, where the input
-	     is what you look at and the metadata sits below it. -->
-	<div id="box">
-		<textarea id="text" placeholder="Notes for this Claude session..." spellcheck="false" disabled></textarea>
-		<div id="foot">
-			<span id="title">AI Notes</span>
-			<span id="session">loading...</span>
-			<span id="status"></span>
-		</div>
-	</div>
-	<!-- Shown INSTEAD of the textarea when the injected payload is not the one the extension ships.
-	     Notes are deliberately withheld: showing them would look like it works while running code
-	     nobody shipped, and a save from here could be handled by a contract that has since changed. -->
-	<div id="stale" style="display:none"></div>
+	<div id="ainotes-boot">Connecting to AI Notes...</div>
+	<div id="ainotes-root"></div>
 
 	<script>
 		(function () {
 			'use strict';
 
-			// Matches the extension's own `ainotes.autosaveDelayMs` default, so a note typed here and
-			// a note typed in the editor settle at the same pace.
-			const SAVE_DELAY_MS = 800;
-
-			const els = {
-				session: document.getElementById('session'),
-				status: document.getElementById('status'),
-				text: document.getElementById('text'),
-				box: document.getElementById('box'),
-				stale: document.getElementById('stale')
-			};
-
-			let saveTimer;
-			/** Set while a push writes into the textarea, so arriving text is not itself an edit. */
-			let loading = false;
 			/**
-			 * The text last handed to the host, or null before anything has arrived.
+			 * What this loader can do for a pane the extension pushes.
 			 *
-			 * The field is locally modified exactly when its value differs from this - which stays
-			 * true for anything typed while a save was in flight. The flag this replaces was cleared
-			 * by the save's acknowledgement, which declared the field settled while newer keystrokes
-			 * were sitting in it, and the next push then overwrote them.
+			 * The whole point of this file is to stop changing: the pane's markup, styling and
+			 * behaviour now live in the extension and arrive over the same road the notes do, so
+			 * updating the extension is enough to change the pane. Only a change to what the LOADER
+			 * itself offers needs a new number here - and a new patch and restart with it.
+			 *
+			 * 1 - a pane is {css, html, js}; the js runs as an inline script in this document; the
+			 *     pane talks to the host itself, using `source: 'ainotes-ui'` and the panel id.
 			 */
-			let lastSent = null;
-
-			function status(text, kind) {
-				els.status.textContent = text;
-				els.status.className = kind || '';
-			}
+			const LOADER = 1;
 
 			// Handed to this frame in its url by the script that built it, and returned on every
 			// message so the host can route the answer without relying on window identity.
 			const panel = new URLSearchParams(location.search).get('panel');
+			const boot = document.getElementById('ainotes-boot');
+			const root = document.getElementById('ainotes-root');
 
-			function ask(kind, text) {
-				parent.postMessage({ source: 'ainotes-ui', panel, kind, text }, '*');
-			}
-
-			els.text.addEventListener('input', () => {
-				if (loading) {
-					return;
+			function post(kind, extra) {
+				const message = { source: 'ainotes-ui', panel: panel, kind: kind };
+				if (extra) {
+					for (const name of Object.keys(extra)) {
+						message[name] = extra[name];
+					}
 				}
-				status('');
-				clearTimeout(saveTimer);
-				saveTimer = setTimeout(() => {
-					// Fire and forget. Nothing comes back on success, so nothing can arrive and
-					// declare the field settled while it is still being typed into.
-					lastSent = els.text.value;
-					ask('save', lastSent);
-				}, SAVE_DELAY_MS);
-			});
+				parent.postMessage(message, '*');
+			}
 
 			/**
-			 * Swap the note out for the update offer.
+			 * The loader's own message, in place of the pane.
 			 *
-			 * Built with `createElement` and `textContent`, never `innerHTML`: the revisions arrive
-			 * from another process, and the workbench enforces Trusted Types with a closed policy
-			 * list, so an HTML sink here would be refused outright.
+			 * Built with `createElement` and `textContent` rather than markup, because the strings
+			 * come from another process. The pane arrives as HTML on purpose - it is the
+			 * extension's own file - but a revision string quoted back at us is data.
 			 */
-			function showStale(installed, expected) {
-				els.box.style.display = 'none';
-				els.stale.style.display = 'block';
-				els.session.textContent = 'update required';
-				status('');
-
+			function notice(text, linkText, onClick, detail) {
+				root.style.display = 'none';
+				boot.style.display = 'block';
 				const line = document.createElement('div');
-				line.textContent = 'You Must Update The Injected Script ';
-
-				const link = document.createElement('a');
-				link.textContent = 'Click here';
-				link.setAttribute('role', 'button');
-				link.tabIndex = 0;
-				const run = () => {
-					els.stale.replaceChildren(
-						document.createTextNode('Updating the injected script...')
-					);
-					ask('updateInjections');
-				};
-				link.addEventListener('click', run);
-				link.addEventListener('keydown', event => {
-					if (event.key === 'Enter' || event.key === ' ') {
-						event.preventDefault();
-						run();
-					}
-				});
-				line.appendChild(link);
-
-				const detail = document.createElement('div');
-				detail.className = 'detail';
-				detail.textContent = 'injected ' + installed + ', extension ships ' + expected;
-
-				els.stale.replaceChildren(line, detail);
+				line.textContent = text;
+				if (linkText) {
+					const link = document.createElement('a');
+					link.textContent = linkText;
+					link.setAttribute('role', 'button');
+					link.tabIndex = 0;
+					link.addEventListener('click', onClick);
+					link.addEventListener('keydown', function (event) {
+						if (event.key === 'Enter' || event.key === ' ') {
+							event.preventDefault();
+							onClick();
+						}
+					});
+					line.appendChild(link);
+				}
+				const parts = [line];
+				if (detail) {
+					const note = document.createElement('div');
+					note.className = 'detail';
+					note.textContent = detail;
+					parts.push(note);
+				}
+				boot.replaceChildren.apply(boot, parts);
 			}
 
-			window.addEventListener('message', event => {
+			function offerUpdate(detail) {
+				notice(
+					'You Must Update The Injected Script ',
+					'Click here',
+					function () {
+						boot.replaceChildren(
+							document.createTextNode('Updating the injected script...')
+						);
+						post('updateInjections');
+					},
+					detail
+				);
+			}
+
+			/** The revision now running, so the same pane is not applied twice. */
+			let applied = null;
+
+			/**
+			 * Put a pushed pane into this document.
+			 *
+			 * This document has no CSP of its own - it declares none, and VS Code adds none to a
+			 * file it serves - so markup and an inline script here are exactly what they look like.
+			 * The workbench document a few frames up allows neither: `script-src` has no
+			 * `unsafe-inline` there, and Trusted Types refuse every HTML sink. That difference is
+			 * the whole reason the pane can live in the extension and be delivered as text.
+			 */
+			function apply(data) {
+				if ((data.needs || 1) > LOADER) {
+					offerUpdate('this pane needs loader ' + data.needs + ', the injected one is ' + LOADER);
+					return;
+				}
+				if (applied === data.revision) {
+					return;
+				}
+				applied = data.revision;
+
+				let style = document.getElementById('ainotes-pane-style');
+				if (!style) {
+					style = document.createElement('style');
+					style.id = 'ainotes-pane-style';
+					document.head.appendChild(style);
+				}
+				style.textContent = data.css || '';
+
+				root.innerHTML = data.html || '';
+				boot.style.display = 'none';
+				root.style.display = 'flex';
+
+				// Replaced rather than added to: a second copy would double every listener the pane
+				// registers. The pane's own dispose hook handles the listeners it already owns.
+				const previous = document.getElementById('ainotes-pane-script');
+				if (previous) {
+					previous.remove();
+				}
+				const script = document.createElement('script');
+				script.id = 'ainotes-pane-script';
+				script.textContent = data.js || '';
+				document.body.appendChild(script);
+			}
+
+			window.addEventListener('message', function (event) {
 				const data = event.data;
 				if (!data || data.source !== 'ainotes-host') {
 					return;
 				}
+				if (data.kind === 'ui') {
+					apply(data);
+					return;
+				}
 				if (data.kind === 'stale') {
-					showStale(data.installed, data.expected);
+					// The injected payload is not the one this extension ships. Notes are withheld
+					// deliberately: showing them would look like it works while running code nobody
+					// shipped, and a save from here could be handled by a contract that has changed.
+					offerUpdate('injected ' + data.installed + ', extension ships ' + data.expected);
 					return;
 				}
 				if (data.kind === 'patched') {
-					// The files on disk are new; this document and its script are still the old ones,
-					// because the workbench only reads them when it loads.
-					els.box.style.display = 'none';
-					els.stale.style.display = 'block';
-					els.stale.replaceChildren(
-						document.createTextNode('Please restart VS Code for the changes to take effect.')
-					);
-					return;
+					// The files on disk are new; this document is still the old one, because the
+					// workbench only reads them when it loads.
+					notice('Please restart VS Code for the changes to take effect.');
 				}
-				if (data.kind === 'notes') {
-					// Whatever the host sends, whenever it sends it. Nothing is awaited here, so
-					// there is no deadline to miss and nothing to retry - a note that arrives late,
-					// or again because it changed elsewhere, is handled by the same path.
-					const incoming = data.text || '';
-					// Locally modified means the field differs from what was last sent. Anything
-					// arriving then is older than what is on screen, so it is dropped rather than
-					// applied - this is the guard that stops a push eating keystrokes.
-					const modified = lastSent !== null && els.text.value !== lastSent;
-					if (!modified && incoming !== els.text.value) {
-						loading = true;
-						els.text.value = incoming;
-						loading = false;
-						lastSent = incoming;
-					} else if (lastSent === null) {
-						lastSent = els.text.value;
-					}
-					els.text.disabled = false;
-					// The messaging address, not the session uuid: this is the name Claude quotes when
-					// asked how to reach it, so it is the one worth being able to read off the panel.
-					// It exists only while the process does, hence the fallback rather than a stale one.
-					els.session.textContent = data.agent || 'not running';
-					if (modified) {
-						// Reconnected holding text the host has not seen. Sent again, still without
-						// waiting for anything back.
-						lastSent = els.text.value;
-						ask('save', lastSent);
-					}
-					return;
-				}
-				if (data.kind === 'error') {
-					// Only locked when there is nothing at risk. Text typed but not yet accepted stays
-					// editable: it survives here, the `lastSent` comparison protects it from being
-					// overwritten, and it is re-sent when the panel reconnects. Disabling mid-sentence
-					// would strand the reader for a condition that recovers on its own.
-					els.text.disabled = lastSent !== null && els.text.value === lastSent;
-					els.session.textContent = 'not connected';
-					// Not final: the host keeps announcing this panel, so a session that becomes
-					// resolvable later arrives as a `notes` event with nothing pressed here.
-					status(data.problem || 'failed', 'bad');
-				}
+				// Everything else is the pane's business, and the pane listens for itself.
 			});
 
-			// Say we exist, once. The host announces this panel until the notes arrive, so there is
-			// nothing to retry from here and no deadline to arm.
-			status('connecting...');
-			ask('ready');
+			// Say we exist, and say what we can run. The host announces this panel until a pane and
+			// its notes arrive, so there is nothing to retry from here.
+			post('ready', { loader: LOADER });
 		})();
 	</script>
 </body>
