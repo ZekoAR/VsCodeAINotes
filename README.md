@@ -1,6 +1,7 @@
 # AI Notes
 
-Notes that live **inside** the Claude Code tab they belong to, stored in a dot-file in the workspace.
+Notes that live **inside** the Claude Code tab they belong to, stored in your user folder, outside the
+repository.
 
 One note per Claude session. Open a Claude Code tab, press the small `n` button in its bottom-left
 corner, and a note panel opens in the lower part of that tab. The note is bound to the session in
@@ -25,7 +26,7 @@ that tab, not to the window or the file you were looking at.
   can see which one it was. Two tabs whose sessions share a title are told apart by position, so each
   row still reaches its own tab. The hamburger button at the bottom reveals **Patch VS Code** and
   **Un-patch VS Code**.
-- **A note edited elsewhere reaches the panel.** Editing `.ainotes.json` by hand reloads any panel
+- **A note edited elsewhere reaches the panel.** Editing the notes file by hand reloads any panel
   showing that note. Text you have typed but not yet saved is never overwritten by an incoming
   update, and it is re-sent automatically if the panel reconnects.
 
@@ -119,7 +120,7 @@ System Access API is present but refuses the grant. Every read and write therefo
 ```
 note panel  --postMessage-->  injected script      (same origin)
             --postMessage-->  AI Notes side panel  (a real webview)
-            --acquireVsCodeApi-->  extension host  --> .ainotes.json
+            --acquireVsCodeApi-->  extension host  --> ~/.ainotes/<folder>.json
 ```
 
 and back the same way. Three things follow from that shape:
@@ -143,8 +144,11 @@ and back the same way. Three things follow from that shape:
 
 ## The notes file
 
-`.ainotes.json` in the workspace root (configurable). It is written whole, through a sibling temp file
-and a rename, so a crash mid-write cannot leave a half-written file where the notes used to be.
+`~/.ainotes/<folder>.json`, one file per workspace folder, named with the same encoding Claude Code
+gives the folder's transcripts: `c:\D\ArcticRobots\ZOD` becomes `c--D-ArcticRobots-ZOD.json`, matched
+case-insensitively against what is on disk (see *How sessions are found*). **Open Notes File** opens it.
+It is written whole, through a sibling temp file and a rename, so a crash mid-write cannot leave a
+half-written file where the notes used to be.
 
 ```json
 {
@@ -173,8 +177,19 @@ not valid JSON at all - its contents become the text of a note rather than being
 A note is created on the first save, not when a panel opens, so glancing at a session never adds an
 empty row to the file.
 
-`.ainotes.json` is git-ignored by default: it is per-developer state, not a deliverable. Remove the
-entry from `.gitignore` if you want the notes committed.
+**Why not in the workspace.** Earlier versions kept a `.ainotes.json` in the workspace root, and
+anything git does to the working tree reached it. Committed by accident, checking out an older branch
+swapped it for that branch's copy, and the newer notes vanished from the panels. Git-ignored, it is
+still expendable to git, which overwrites an ignored file from any branch that tracks it. The notes are
+bound to session ids that only exist in this machine's `~/.claude`, so they live on the machine too.
+Two costs come with that: moving or renaming a project folder detaches its notes, just as it detaches
+Claude Code's own history, and two paths that differ only in punctuation share one file.
+
+**Upgrading.** The first time a folder opens with no file of its own under `~/.ainotes`, its
+`.ainotes.json` - or the name the old `ainotes.storeFileName` setting gave it - is copied in, and a
+message says so. The old file is never modified or deleted, and once the new file exists it is not
+read again. If the old file is committed, open the folder on the branch whose notes you want before
+the first run.
 
 Panel heights are **not** in this file. They are per-machine view state, kept in VS Code's workspace
 storage, because a window size has no business turning up in a diff.
@@ -261,13 +276,12 @@ time; the tab id is what the binding is *kept* under.
 | Command | Does |
 | --- | --- |
 | `AI Notes: Save Notes Now` | Flushes pending keystrokes to disk |
-| `AI Notes: Open Notes File` | Opens `.ainotes.json` in an editor tab |
+| `AI Notes: Open Notes File` | Opens this folder's notes file from `~/.ainotes` in an editor tab |
 
 ## Settings
 
 | Setting | Default | Does |
 | --- | --- | --- |
-| `ainotes.storeFileName` | `.ainotes.json` | Name of the dot-file, relative to the workspace root |
 | `ainotes.autosaveDelayMs` | `800` | Idle time after the last keystroke before writing |
 | `ainotes.sessionHistoryLimit` | `25` | How many past sessions are considered when resolving a tab caption |
 | `ainotes.claudeHome` | `""` | Override the scanned Claude home. Empty means `$CLAUDE_CONFIG_DIR`, else `~/.claude` |

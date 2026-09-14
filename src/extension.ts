@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { NotesWorkspace } from './notesWorkspace';
 import { SidePanelProvider } from './sidePanel';
-import { NotesStore } from './store';
+import { NotesStore, importLegacyNotes, notesFileFor } from './store';
 
 let workspace: NotesWorkspace | undefined;
 
@@ -32,10 +32,27 @@ export function activate(context: vscode.ExtensionContext): void {
 		return;
 	}
 
-	const fileName = vscode.workspace
+	const store = new NotesStore(notesFileFor(folder.uri.fsPath));
+
+	// Earlier versions kept the notes in a dot-file in the workspace root, under a name that was a
+	// setting. The setting is gone from the manifest, but a value someone set is still readable, and
+	// it is the only record of where their notes are.
+	const legacyName = vscode.workspace
 		.getConfiguration('ainotes')
 		.get<string>('storeFileName', '.ainotes.json');
-	const store = new NotesStore(path.join(folder.uri.fsPath, fileName));
+	const legacyPath = path.join(folder.uri.fsPath, legacyName);
+	try {
+		if (importLegacyNotes(store, legacyPath)) {
+			void vscode.window.showInformationMessage(
+				`AI Notes moved this folder's notes to ${store.filePath}. ` +
+					`${legacyName} was left in place and is no longer used.`
+			);
+		}
+	} catch (err) {
+		void vscode.window.showErrorMessage(
+			`AI Notes could not import ${legacyPath}: ${(err as Error).message}. That file is untouched.`
+		);
+	}
 	workspace = new NotesWorkspace(store, folder.uri.fsPath);
 	context.subscriptions.push(workspace);
 

@@ -45,7 +45,7 @@ export interface SessionRow {
 }
 
 /**
- * Owns the notes dot-file, every note in it, and the one watcher and poll that keep their session
+ * Owns the notes file, every note in it, and the one watcher and poll that keep their session
  * state fresh.
  *
  * There is one of these per workspace folder. Editors reference a note by id and read through here,
@@ -397,12 +397,22 @@ export class NotesWorkspace implements vscode.Disposable {
 	}
 
 	/**
-	 * Reload when the dot-file is edited outside the panels. Without this, having the file open in
+	 * Reload when the notes file is edited outside the panels. Without this, having the file open in
 	 * an editor and in a panel at once silently loses whichever side saves second.
+	 *
+	 * The file lives outside the workspace, so the pattern is based on its folder's Uri, which is the
+	 * API's route for watching a path outside the workspace. The folder is created up front so the
+	 * watcher is never aimed at a path that does not exist yet; otherwise the first write creates it.
 	 */
 	private watchFile(): void {
+		const dir = path.dirname(this.store.filePath);
+		try {
+			fs.mkdirSync(dir, { recursive: true });
+		} catch {
+			// A folder that cannot be created cannot be written either, and the save reports that.
+		}
 		const pattern = new vscode.RelativePattern(
-			this.workspaceRoot,
+			vscode.Uri.file(dir),
 			path.basename(this.store.filePath)
 		);
 		this.fileWatcher = vscode.workspace.createFileSystemWatcher(pattern);

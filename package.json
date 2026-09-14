@@ -1,7 +1,7 @@
 {
   "name": "ainotes",
   "displayName": "AI Notes",
-  "description": "A notes panel bound to a Claude Code session, stored in a dot-file in the workspace.",
+  "description": "A notes panel bound to a Claude Code session, stored in your user folder, outside the repository.",
   "version": "1.3.0",
   "publisher": "arcticrobots",
   "private": true,
@@ -60,11 +60,6 @@
     "configuration": {
       "title": "AI Notes",
       "properties": {
-        "ainotes.storeFileName": {
-          "type": "string",
-          "default": ".ainotes.json",
-          "markdownDescription": "Name of the dot-file, relative to the workspace folder root, that holds the notes text and the bound session."
-        },
         "ainotes.autosaveDelayMs": {
           "type": "number",
           "default": 800,
