@@ -149,8 +149,10 @@ body {
 }
 
 /* Transparent at rest so it draws no line across the panel, but still occupying its space, with a
-   three-dot grip as the only thing that says "drag me". The same treatment as the injected panel. */
-#general-split {
+   three-dot grip as the only thing that says "drag me". The same treatment as the injected panel,
+   shared by the folder note's splitter and the one above the snippet form. */
+#general-split,
+#snippet-split {
 	flex: 0 0 4px;
 	display: flex;
 	align-items: center;
@@ -161,11 +163,14 @@ body {
 }
 
 #general-split:hover,
-#general-split.dragging {
+#general-split.dragging,
+#snippet-split:hover,
+#snippet-split.dragging {
 	background: #c96442;
 }
 
-#general-split .grip {
+#general-split .grip,
+#snippet-split .grip {
 	display: flex;
 	align-items: center;
 	gap: 3px;
@@ -173,11 +178,14 @@ body {
 }
 
 #general-split:hover .grip,
-#general-split.dragging .grip {
+#general-split.dragging .grip,
+#snippet-split:hover .grip,
+#snippet-split.dragging .grip {
 	opacity: 0;
 }
 
-#general-split .grip i {
+#general-split .grip i,
+#snippet-split .grip i {
 	width: 2px;
 	height: 2px;
 	border-radius: 50%;
@@ -257,5 +265,133 @@ body {
 	color: var(--vscode-textLink-foreground);
 	cursor: pointer;
 	text-decoration: underline;
+}
+
+/* The two tabs across the top. Everything below them belongs to one tab or the other. */
+.tabs {
+	flex: 0 0 auto;
+	display: flex;
+	gap: 2px;
+	margin-bottom: 4px;
+	padding: 0 8px;
+	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+
+/* The underline sits on the strip's own border, and uses the accent the fields focus with. */
+.tab {
+	margin-bottom: -1px;
+	padding: 6px 8px 5px;
+	border: none;
+	border-bottom: 1px solid transparent;
+	color: var(--vscode-panelTitle-inactiveForeground, var(--vscode-descriptionForeground));
+	background: transparent;
+	font-family: inherit;
+	font-size: inherit;
+	cursor: pointer;
+}
+
+.tab:hover,
+.tab[aria-selected='true'] {
+	color: var(--vscode-panelTitle-activeForeground, var(--vscode-foreground));
+}
+
+.tab[aria-selected='true'] {
+	border-bottom-color: #c96442;
+}
+
+.tab:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+/* One tab's content: a column of its own, laid out exactly as the body used to lay out the panel. */
+.tab-panel {
+	flex: 1 1 auto;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+/* The snippet the form below is editing. After `.row:hover`, so hovering it does not hide it. */
+.row.selected {
+	border-left-color: #c96442;
+	background: var(--vscode-list-inactiveSelectionBackground);
+	color: var(--vscode-list-inactiveSelectionForeground, var(--vscode-foreground));
+}
+
+.side-list:focus-within .row.selected {
+	background: var(--vscode-list-activeSelectionBackground);
+	color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+}
+
+/* The description colour is chosen for the panel background and can vanish on a selection. */
+.side-list:focus-within .row.selected .row-meta {
+	color: inherit;
+	opacity: 0.8;
+}
+
+/* Where Insert New... will put the next snippet: a line along the top of the row it goes above. */
+.row.insert-before {
+	box-shadow: inset 0 2px 0 #c96442;
+}
+
+/* Title, prompt and the button that stores them, under the snippet list and its splitter. Once
+   dragged, the height is set inline like the folder note's - border-box, so the height measured is
+   the height set. The ceiling stops a stored height from pushing the splitter out of a panel that has
+   since become shorter; its 60px is the list's floor, and side.js clamps a drag to the same number. */
+.snippet-form {
+	flex: 0 0 auto;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	box-sizing: border-box;
+	min-height: 0;
+	max-height: calc(100% - 60px);
+	padding: 2px 8px 8px;
+}
+
+/* The same rounded box and focus accent as the folder note's field, and the same editor font the
+   notes use - for the title as well as the prompt, so the two fields read as one piece of text. */
+#snippet-title,
+#snippet-prompt {
+	box-sizing: border-box;
+	width: 100%;
+	padding: 5px 8px;
+	border: 1px solid var(--vscode-input-border, #3a3a3a);
+	border-radius: 10px;
+	outline: none;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	font-family: var(--vscode-editor-font-family);
+	font-size: var(--vscode-editor-font-size);
+	transition: border-color 120ms ease;
+}
+
+/* The prompt takes the height the form has spare: 9em until the splitter is dragged, then whatever
+   the drag left. */
+#snippet-prompt {
+	flex: 1 1 9em;
+	min-height: 0;
+	resize: none;
+	line-height: 1.5;
+}
+
+#snippet-title:focus,
+#snippet-prompt:focus {
+	border-color: #c96442;
+}
+
+#snippet-title::placeholder,
+#snippet-prompt::placeholder {
+	color: var(--vscode-input-placeholderForeground);
+}
+
+.primary:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.primary:disabled:hover {
+	background: var(--vscode-button-background);
 }
 

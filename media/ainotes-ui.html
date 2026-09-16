@@ -200,6 +200,15 @@
 					// The files on disk are new; this document is still the old one, because the
 					// workbench only reads them when it loads.
 					notice('Please restart VS Code for the changes to take effect.');
+					return;
+				}
+				if (data.kind === 'error' && applied === null) {
+					// No pane has arrived, so nothing else is listening for this - and the pane only
+					// ever arrives through the side panel, so the likeliest problem is that very side
+					// panel not being open. Dropping it here left the reader on "Connecting to AI
+					// Notes..." for good, with the reason sent and never shown.
+					notice(data.problem || 'AI Notes could not connect.');
+					return;
 				}
 				// Everything else is the pane's business, and the pane listens for itself.
 			});

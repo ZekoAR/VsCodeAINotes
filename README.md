@@ -21,11 +21,13 @@ that tab, not to the window or the file you were looking at.
 - **The footer shows the session's messaging address** - `ainotes-2f`, the same name Claude quotes
   when you ask it how another session can reach it. It reads `not running` when the session's process
   has gone, because that name belongs to the process and stops existing with it.
-- **The side panel** in the activity bar shows the state of the injection and lists the Claude Code
-  tabs currently open. **Double-click** a row to focus that tab; it flashes orange three times so you
-  can see which one it was. Two tabs whose sessions share a title are told apart by position, so each
-  row still reaches its own tab. The hamburger button at the bottom reveals **Patch VS Code** and
-  **Un-patch VS Code**.
+- **The side panel** in the activity bar has two tabs. **Session Notes** shows the state of the
+  injection and lists the Claude Code tabs currently open. **Double-click** a row to focus that tab;
+  it flashes orange three times so you can see which one it was. Two tabs whose sessions share a
+  title are told apart by position, so each row still reaches its own tab. The hamburger button at
+  the bottom reveals **Patch VS Code** and **Un-patch VS Code**. The panel reopens on the tab you
+  left it on.
+- **Prompt Snippets**, the second tab, keeps prompts you reuse - see *Prompt snippets* below.
 - **A note edited elsewhere reaches the panel.** Editing the notes file by hand reloads any panel
   showing that note. Text you have typed but not yet saved is never overwritten by an incoming
   update, and it is re-sent automatically if the panel reconnects.
@@ -72,8 +74,27 @@ deleted, leaving `workbench.html` byte-identical to how it started.
 3. **Restart VS Code fully.** A window reload is not enough: `workbench.html` is only read when the
    window's document loads.
 
-The view must be opened at least once per window, because it is the road between the panels and the
-notes file (see below). A panel that cannot find it says so rather than sitting blank.
+The view has to be opened once per window, because it is the road between the panels and the notes
+file (see below) - and it opens itself. About two seconds after the window loads, if it has a Claude
+Code tab and no AI Notes webview yet, the injected script presses the AI Notes item in the activity
+bar, waits for the webview to exist, and puts the side bar back exactly as it was, with the side bar
+and activity bar hidden by `visibility` throughout so nothing is seen moving. A note panel that later
+finds no side panel does the same, as a fallback.
+
+At load rather than when a panel first needs it, for two reasons: a Claude tab restored in the
+background has no panel until it is clicked, so waiting would move this into the middle of your work;
+and the workbench is still settling then, which is where it shows least. Not immediately, because
+VS Code restores its own layout as it starts, and the side bar has to be something before it can be
+put back.
+
+This is done from the page rather than by the extension because only the page knows what to put back:
+VS Code creates a view's webview only when the view is shown, there is no setting or API to create one
+unseen, and nothing in the extension API says which section the side bar was showing or whether it was
+open at all. In the page, both are there to read.
+
+Two things it cannot hide. If the side bar was **closed**, opening it resizes the editor for a moment,
+and no styling prevents that. And if the AI Notes item is not in the activity bar at all - hidden by
+the user - the panel falls back to saying *The AI Notes side panel is not open in this window*.
 
 ### Keeping the injection current
 
@@ -194,6 +215,58 @@ the first run.
 Panel heights are **not** in this file. They are per-machine view state, kept in VS Code's workspace
 storage, because a window size has no business turning up in a diff.
 
+## Prompt snippets
+
+The side panel's **Prompt Snippets** tab keeps prompts you reuse. The list is at the top; underneath
+are a **Title** field, a **Prompt** field and the **Add** button. Drag the splitter between the list
+and the fields to give the prompt more room; the height is remembered per workspace, like the folder
+note's.
+
+- **Add** stores what is in the fields as a new snippet, at the end of the list, and clears them. It
+  is disabled until the prompt has some text. The title is optional: an untitled snippet is listed
+  under its prompt's first line.
+- **Click** a snippet to load it into the fields and edit it there. Changes are saved as you type, a
+  moment after each pause, so there is nothing to press. The button becomes **Update**; pressing it
+  empties the fields and turns it back into **Add**, ready for a new snippet. Clicking the snippet
+  again, or `Escape` in a field, does the same. An emptied prompt is never saved - the snippet keeps
+  the last prompt it had.
+- **Double-click** a snippet to copy its prompt to the clipboard. The status bar confirms it.
+- **Right-click** a snippet for **Insert New...**, **Copy to clipboard** and **Remove**.
+  **Insert New...** starts a new snippet in that place: the next **Add** puts it above the snippet you
+  right-clicked, which carries a line along its top until then. If you were editing a snippet the
+  fields empty first; a new one you were already typing is kept, and is what gets inserted. `Escape`
+  in a field cancels the placement, and **Add** then appends as usual. Right-clicking the empty part
+  of the list offers **Insert New...** on its own, which adds at the end. Copying takes the prompt,
+  never the title. Remove is immediate, with no confirmation.
+
+The snippets are **one list for every folder**, in `~/.ainotes/snippets.json`, beside the notes files.
+A prompt is about how you work with Claude, not about one project, so a list per folder would mean
+typing the same prompts into every project - and a window with no folder open can use them too.
+
+```json
+{
+  "version": 1,
+  "snippets": [
+    {
+      "id": "6b1f3c2e-9d4a-4e0b-8a55-2c7d1e9f0a31",
+      "title": "Review the diff",
+      "prompt": "Review the current diff for correctness bugs first, style second."
+    }
+  ]
+}
+```
+
+It is written whole, through a temp file and a rename: on every add and remove, and a moment after
+you stop typing in a snippet you are editing. Another VS Code
+window, or a hand edit, reaches an open panel through a file watcher, and each change re-reads the file
+first when it has moved, so one window cannot write its older list over a snippet another window just
+added. A file that is not valid JSON becomes a single snippet holding its text rather than being
+dropped, and a file that exists but cannot be read is never overwritten.
+
+The three right-click entries are commands (`ainotes.snippetInsert`, `ainotes.snippetCopy`,
+`ainotes.snippetRemove`), but they are hidden from the command palette: without a row under the
+pointer there is nothing for them to act on.
+
 ## How sessions are found
 
 Two sources, because they answer different questions:
@@ -262,6 +335,20 @@ candidates the caption offers. So two sessions called *Fix the build* are two ta
 where before the lookup found two answers, refused to choose, and left both panels reporting *no
 session matches*. A claim outlives the caption that made it - a session renamed mid-flight keeps its
 note - and is released when that tab closes, freeing the session for a tab that reopens it.
+
+**A panel reads its tab only while that tab is showing.** VS Code does not put a webview's container
+inside its tab: it appends it to the window root and positions it over the editor with CSS anchor
+positioning, and every webview tab in an editor group anchors to the same element. Hiding a tab only
+sets `visibility: hidden` on its container and leaves the anchor alone, so a hidden container asked
+which tab it belongs to finds the group's *active* tab - another panel's. Reading it anyway pointed
+every hidden panel at the session on screen: switching to a tab showed the note of the tab you had
+just left until the next sweep caught up, and text typed just before a switch could be saved into the
+other session's note. So a panel binds to its tab the first time its container is showing, from a
+reading that is still the same 250 ms later - a switch is several separate writes, and a reading taken
+between them can name the wrong tab - and keeps that tab while hidden. Switching back to a tab shows
+its own note at once, with nothing to reload. A tab viewed for the first time binds as soon as VS Code
+shows it, because the script watches the `style` attribute of each Claude container: that one
+attribute on those few elements, never the workbench.
 
 What the key is *not* is the Claude session id. That is not anywhere in the workbench DOM: it lives
 inside the Claude webview's own page, which is another origin, and in Claude's session files, which

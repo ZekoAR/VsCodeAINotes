@@ -46,6 +46,18 @@ export function newNote(): Note {
 }
 
 /**
+ * Replace a file's content through a sibling temp file and a rename, so a crash mid-write cannot
+ * leave a half-written file where the old content used to be. Creates the folder if it is missing.
+ */
+export function writeFileAtomic(filePath: string, text: string): void {
+	const dir = path.dirname(filePath);
+	fs.mkdirSync(dir, { recursive: true });
+	const temp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.tmp`);
+	fs.writeFileSync(temp, text, 'utf8');
+	fs.renameSync(temp, filePath);
+}
+
+/**
  * One workspace folder's notes file. JSON, written whole.
  *
  * Writes go through a sibling temp file and a rename so a crash mid-write cannot leave a
@@ -72,11 +84,7 @@ export class NotesStore {
 
 	write(doc: NotesDoc): void {
 		const serialised = JSON.stringify(doc, null, 2) + '\n';
-		const dir = path.dirname(this.filePath);
-		fs.mkdirSync(dir, { recursive: true });
-		const temp = path.join(dir, `.${path.basename(this.filePath)}.${process.pid}.tmp`);
-		fs.writeFileSync(temp, serialised, 'utf8');
-		fs.renameSync(temp, this.filePath);
+		writeFileAtomic(this.filePath, serialised);
 		this.lastWritten = serialised;
 	}
 

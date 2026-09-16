@@ -4,6 +4,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import * as vscode from 'vscode';
 import { NoteChange, NotesWorkspace, SessionRow } from './notesWorkspace';
+import { SnippetLibrary, copySnippet } from './snippets';
 
 /**
  * The comment the patch script leaves in `workbench.html`. Detection reads this; the scripts below
@@ -65,6 +66,10 @@ const PANE_LOADER = 1;
 /** Where the folder note's panel size and open state live - view state, so per machine. */
 const GENERAL_HEIGHT_KEY = 'ainotes.general.height';
 const GENERAL_OPEN_KEY = 'ainotes.general.open';
+/** Which of the side panel's tabs was showing - view state too, so the panel reopens on it. */
+const TAB_KEY = 'ainotes.side.tab';
+/** The snippet form's dragged height, beside the folder note's. */
+const SNIPPETS_HEIGHT_KEY = 'ainotes.snippets.height';
 
 /** A per-render nonce, so the webview's CSP can name the one script it will run. */
 function makeNonce(): string {
@@ -95,7 +100,12 @@ type InboundMessage =
 	| { type: 'generalHeight'; height: number }
 	| { type: 'generalOpen'; open: boolean }
 	| { type: 'injectedTabs'; tabs: Array<{ key: string; caption: string; active: boolean }> }
-	| { type: 'runInjector' };
+	| { type: 'runInjector' }
+	| { type: 'snippetAdd'; title: string; prompt: string; beforeId?: string }
+	| { type: 'snippetUpdate'; id: string; title: string; prompt: string; done?: boolean }
+	| { type: 'snippetCopy'; id: string }
+	| { type: 'tabSelected'; tab: string }
+	| { type: 'snippetsHeight'; height: number };
 
 /** One open Claude tab, as the side panel lists it. */
 type TabRow = {
@@ -271,9 +281,13 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 	constructor(
 		private readonly extensionUri: vscode.Uri,
 		private readonly workspace: NotesWorkspace | undefined,
-		/** Per-machine view state: panel heights, keyed by session. */
+		/** The prompt snippets. Present with or without a folder: they belong to none. */
+		private readonly snippets: SnippetLibrary,
+		/** Per-machine view state: panel heights, keyed by session, and the selected tab. */
 		private readonly state?: vscode.Memento
 	) {
+		// The list is pushed whole whenever it changes, from this window or from the file.
+		this.disposables.push(this.snippets.onDidChange(() => this.postSnippets()));
 		// The list shows which sessions already have a note, so it repaints when notes change - and
 		// the same event is what carries an edit made elsewhere out to the injected panels.
 		if (this.workspace) {
@@ -306,6 +320,7 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 				case 'ready':
 					this.postRows();
 					this.postGeneral();
+					this.postSnippets();
 					// The panel has no way to look at the install itself, so the state of the
 					// injection is pushed to it the moment it is able to render.
 					this.postInjectState();
@@ -350,6 +365,25 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 					return;
 				case 'generalOpen':
 					void this.state?.update(GENERAL_OPEN_KEY, message.open);
+					return;
+				case 'snippetAdd':
+					this.snippetAdd(message.title, message.prompt, message.beforeId);
+					return;
+				case 'snippetUpdate':
+					this.snippetUpdate(message.id, message.title, message.prompt, message.done);
+					return;
+				case 'snippetCopy':
+					if (typeof message.id === 'string') {
+						void copySnippet(this.snippets, message.id);
+					}
+					return;
+				case 'tabSelected':
+					void this.state?.update(TAB_KEY, message.tab === 'snippets' ? 'snippets' : 'notes');
+					return;
+				case 'snippetsHeight':
+					if (Number.isFinite(message.height) && message.height > 0) {
+						void this.state?.update(SNIPPETS_HEIGHT_KEY, Math.round(message.height));
+					}
 					return;
 			}
 		});
@@ -493,6 +527,64 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 			listed: this.domTabsSeen,
 			noFolder: !this.workspace
 		});
+	}
+
+	/**
+	 * The whole snippet list. Posted while the view is hidden too, unlike the rows: the webview is
+	 * retained, so it receives it, and the list is small enough that there is no resend to arrange.
+	 */
+	private postSnippets(): void {
+		void this.view?.webview.postMessage({ type: 'snippets', snippets: this.snippets.list() });
+	}
+
+	/**
+	 * Start a new snippet above the one right-clicked, or at the end when the empty part of the list
+	 * was. Passed straight on from the context-menu command: the form is the webview's, so only it
+	 * can do anything with this.
+	 */
+	insertSnippet(beforeId: string | undefined): void {
+		void this.view?.webview.postMessage({ type: 'snippetInsert', beforeId });
+	}
+
+	/**
+	 * Store a new snippet, above `beforeId` when the form was started from Insert New... The list
+	 * itself arrives through the change event; `snippetSaved` only tells the form its text is stored,
+	 * which is what it waits for before clearing - so a failed write, which the library has already
+	 * reported, leaves the text where it was.
+	 */
+	private snippetAdd(title: unknown, prompt: unknown, beforeId: unknown): void {
+		if (typeof title !== 'string' || typeof prompt !== 'string' || !prompt.trim()) {
+			return;
+		}
+		if (this.snippets.add(title, prompt, typeof beforeId === 'string' ? beforeId : undefined)) {
+			void this.view?.webview.postMessage({ type: 'snippetSaved', title, prompt });
+		}
+	}
+
+	/**
+	 * Write an edit back. The side panel sends one a moment after each pause in typing, and one with
+	 * `done` when Update is pressed - only that one is acknowledged, because only it clears the form.
+	 */
+	private snippetUpdate(id: unknown, title: unknown, prompt: unknown, done: unknown): void {
+		if (
+			typeof id !== 'string' ||
+			typeof title !== 'string' ||
+			typeof prompt !== 'string' ||
+			!prompt.trim()
+		) {
+			return;
+		}
+		if (this.snippets.update(id, title, prompt)) {
+			if (done === true) {
+				void this.view?.webview.postMessage({ type: 'snippetSaved', title, prompt });
+			}
+		} else if (!this.snippets.get(id)) {
+			// A failed write has been reported already. A missing snippet has not: it was removed in
+			// another window or by hand, and the form has already followed the list back to Add.
+			void vscode.window.showWarningMessage(
+				'AI Notes: that snippet no longer exists - it was removed elsewhere.'
+			);
+		}
 	}
 
 	/**
@@ -959,6 +1051,15 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 
 	private html(webview: vscode.Webview): string {
 		const nonce = makeNonce();
+		// Rendered into the page rather than sent after it loads, so the panel never paints the wrong
+		// tab first. Only ever one of two literals, never the stored string itself.
+		const tab = this.state?.get<string>(TAB_KEY) === 'snippets' ? 'snippets' : 'notes';
+		// Rendered in for the same reason, and only ever a whole number or nothing at all.
+		const formHeight = this.state?.get<number>(SNIPPETS_HEIGHT_KEY);
+		const formHeightAttr =
+			typeof formHeight === 'number' && Number.isFinite(formHeight) && formHeight > 0
+				? ` data-height="${Math.round(formHeight)}"`
+				: '';
 		const styleUri = webview.asWebviewUri(
 			vscode.Uri.joinPath(this.extensionUri, 'media', 'main.css')
 		);
@@ -974,24 +1075,43 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 <link href="${styleUri}" rel="stylesheet">
 <title>AI Notes</title>
 </head>
-<body class="side">
-<div id="stale" class="stale" role="alert" style="display:none"></div>
-<div id="rows" class="side-list" role="listbox" tabindex="-1"></div>
-<!-- The folder's own note. Its splitter sits between the list and the field, the same shape the
-     panel injected into a Claude tab uses. -->
-<div id="general" hidden>
-  <div id="general-split" title="Drag to resize"><span class="grip"><i></i><i></i><i></i></span></div>
-  <textarea id="general-text" placeholder="Notes for this folder..." spellcheck="false"></textarea>
+<body class="side" data-tab="${tab}">
+<div class="tabs" role="tablist">
+  <button id="tab-button-notes" class="tab" type="button" role="tab" data-tab="notes" aria-controls="tab-notes" aria-selected="${tab === 'notes'}">Session Notes</button>
+  <button id="tab-button-snippets" class="tab" type="button" role="tab" data-tab="snippets" aria-controls="tab-snippets" aria-selected="${tab === 'snippets'}">Prompt Snippets</button>
 </div>
-<!-- Actions that reach outside the workspace and need a restart to take effect. Kept behind the
-     menu rather than in reach: patching VS Code itself is not a thing to click by accident. -->
-<div id="dev-tools" class="side-bottom" hidden>
-  <button id="spike-patch" class="primary wide" type="button">Patch VS Code</button>
-  <button id="spike-unpatch" class="primary wide" type="button">Un-patch VS Code</button>
+<!-- Everything the panel showed before it had tabs, unchanged. -->
+<div id="tab-notes" class="tab-panel" role="tabpanel" aria-labelledby="tab-button-notes"${tab === 'notes' ? '' : ' hidden'}>
+  <div id="stale" class="stale" role="alert" style="display:none"></div>
+  <div id="rows" class="side-list" role="listbox" tabindex="-1"></div>
+  <!-- The folder's own note. Its splitter sits between the list and the field, the same shape the
+       panel injected into a Claude tab uses. -->
+  <div id="general" hidden>
+    <div id="general-split" title="Drag to resize"><span class="grip"><i></i><i></i><i></i></span></div>
+    <textarea id="general-text" placeholder="Notes for this folder..." spellcheck="false"></textarea>
+  </div>
+  <!-- Actions that reach outside the workspace and need a restart to take effect. Kept behind the
+       menu rather than in reach: patching VS Code itself is not a thing to click by accident. -->
+  <div id="dev-tools" class="side-bottom" hidden>
+    <button id="spike-patch" class="primary wide" type="button">Patch VS Code</button>
+    <button id="spike-unpatch" class="primary wide" type="button">Un-patch VS Code</button>
+  </div>
+  <div class="side-menu">
+    <button id="general-toggle" class="iconbtn" type="button" aria-expanded="false" aria-controls="general" title="Notes for this folder" hidden>n</button>
+    <button id="menu" class="iconbtn" type="button" aria-expanded="false" aria-controls="dev-tools" title="Menu">&#9776;</button>
+  </div>
 </div>
-<div class="side-menu">
-  <button id="general-toggle" class="iconbtn" type="button" aria-expanded="false" aria-controls="general" title="Notes for this folder" hidden>n</button>
-  <button id="menu" class="iconbtn" type="button" aria-expanded="false" aria-controls="dev-tools" title="Menu">&#9776;</button>
+<!-- The stored prompts above, and the form that adds or updates one below. -->
+<div id="tab-snippets" class="tab-panel" role="tabpanel" aria-labelledby="tab-button-snippets"${tab === 'snippets' ? '' : ' hidden'}>
+  <!-- The context is what VS Code's right-click menu reads: on the empty part of the list it offers
+       Insert New... alone, and a row's own context overrides it with the row's entries. -->
+  <div id="snippet-list" class="side-list" role="listbox" tabindex="-1" aria-label="Prompt snippets" data-vscode-context='{"webviewSection":"snippetList","preventDefaultContextMenuItems":true}'></div>
+  <div id="snippet-split" title="Drag to resize"><span class="grip"><i></i><i></i><i></i></span></div>
+  <form id="snippet-form" class="snippet-form"${formHeightAttr}>
+    <input id="snippet-title" type="text" placeholder="Title" spellcheck="false" autocomplete="off" aria-label="Title">
+    <textarea id="snippet-prompt" placeholder="Prompt..." spellcheck="false" aria-label="Prompt"></textarea>
+    <button id="snippet-save" class="primary wide" type="submit" disabled>Add</button>
+  </form>
 </div>
 <!-- One hover card, reused by every row. Styled like VS Code's own hover rather than left to the
      OS tooltip, which cannot be themed. It lives inside this webview, so unlike the OS tooltip it

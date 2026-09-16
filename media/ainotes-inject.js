@@ -30,6 +30,26 @@
 	const REGISTER_RETRY_MS = 3000;
 	/** How long a panel may go unanswered before it reports its own state to the console. */
 	const STUCK_AFTER_MS = 8000;
+	/**
+	 * How long a tab reading must hold, with its container still showing, before it is believed. A tab
+	 * switch is several separate writes, and this is past all of them. A tab viewed for the first time
+	 * waits it once; a tab already bound never does.
+	 */
+	const SETTLE_MS = 250;
+	/** The label VS Code renders on this extension's activity bar item. */
+	const SIDE_PANEL_LABEL = 'AI Notes';
+	/** How long to wait for the side panel's webview to turn up after its item is pressed. */
+	const WAKE_TIMEOUT_MS = 3000;
+	/** A floor between attempts, so a window where this does not work is not poked on every retry. */
+	const WAKE_RETRY_MS = 60000;
+	/**
+	 * How long after this script loads the side panel is opened by itself.
+	 *
+	 * Close to load, where the workbench is still settling and a side bar opening and closing is least
+	 * noticeable - but not immediately: VS Code restores its own layout as it starts, and putting the
+	 * side bar back before it has decided what the side bar is would be putting it back to nothing.
+	 */
+	const WAKE_AFTER_LOAD_MS = 2000;
 	const CLAUDE_EXTENSION = 'Anthropic.claude-code';
 	/**
 	 * How a Claude tab names itself in the DOM.
@@ -276,7 +296,7 @@
 	/**
 	 * A tab's own text.
 	 *
-	 * The same element `captionFor` reads, without its fallbacks: this is for a tab found in the DOM
+	 * The same element `captionOf` reads, without its fallbacks: this is for a tab found in the DOM
 	 * rather than resolved from a container, where there is no editor group to disambiguate an
 	 * `aria-label` against.
 	 */
@@ -309,23 +329,36 @@
 	}
 
 	/**
-	 * The unique id of the tab this panel lives in.
+	 * Whether this container is the one its editor group is showing.
 	 *
-	 * `data-resource-name`, which VS Code sets from the basename of that editor's resource:
+	 * The only time a tab reading means anything. Every webview editor in a group anchors its
+	 * container to the same element, and a hidden container keeps that anchor - read in the shipped
+	 * workbench: `release()` only sets `visibility = "hidden"`, `_show()` sets it back to `"visible"`,
+	 * and neither touches `position-anchor`. So `tabFor` on a hidden container finds the group's
+	 * active tab, which belongs to a different container. Reading it anyway is what pointed every
+	 * hidden panel at the visible tab's session, so a tab switched to showed the note of the tab just
+	 * left until the next sweep caught up.
+	 */
+	function isShowing(overlay) {
+		return isLive(overlay) && overlay.style.visibility !== 'hidden';
+	}
+
+	/**
+	 * The tab this container belongs to: its caption and its unique id, from one walk so the two
+	 * cannot name different tabs. Only to be believed while `isShowing`.
+	 *
+	 * The id is `data-resource-name`, which VS Code sets from the basename of that editor's resource:
 	 * `webview-claudeVSCodePanel-<uuid>`, minted per editor. It is what the extension binds the note
 	 * to, so two sessions carrying the same title are two bindings rather than one ambiguous lookup
 	 * that resolves to neither.
-	 *
-	 * Read through the same walk as the caption, so it names the same tab the caption came from -
-	 * they must agree or the binding would be filed against the wrong session.
 	 */
-	function tabKeyFor(overlay) {
+	function readTab(overlay) {
 		const tab = tabFor(overlay);
-		return (tab && tab.getAttribute('data-resource-name')) || null;
+		const caption = captionOf(tab);
+		return caption ? { caption, tabKey: tab.getAttribute('data-resource-name') || null } : null;
 	}
 
-	function captionFor(overlay) {
-		const tab = tabFor(overlay);
+	function captionOf(tab) {
 		if (!tab) {
 			return null;
 		}
@@ -343,39 +376,98 @@
 		return aria.trim() || null;
 	}
 
-	/** Announce one panel. Idempotent: the extension treats a repeat as a refresh. */
+	/**
+	 * Announce one panel, under the tab it is bound to. Idempotent: the extension treats a repeat as a
+	 * refresh.
+	 *
+	 * A panel not bound yet has nothing true to announce, so it goes to `checkTab` instead, which
+	 * waits for its container to be showing. Until then its frame says it is connecting - seen by
+	 * nobody, since a hidden tab's panel is hidden with it.
+	 */
 	function register(entry) {
-		const caption = captionFor(entry.overlay);
 		entry.lastRegister = Date.now();
-		if (!caption) {
-			entry.connected = false;
-			toFrame(entry, { kind: 'error', problem: 'could not read this tab’s caption' });
+		if (!entry.bound) {
+			checkTab(entry);
 			return;
 		}
-		// Remembered so the sweep can notice the caption changing under a container VS Code reused
-		// for a different session - otherwise that panel would keep showing the previous note.
-		entry.caption = caption;
 		// The tab's own id travels with the caption, and is what the note is bound to. The caption
 		// stays because it is how a session is FOUND the first time - the id means nothing to Claude.
-		entry.tabKey = tabKeyFor(entry.overlay);
 		const sent = toSidePanel({
 			source: 'ainotes-inject',
 			kind: 'register',
 			panel: entry.id,
-			caption,
+			caption: entry.caption,
 			tabKey: entry.tabKey,
 			version: VERSION,
 			loader: entry.loader
 		});
 		if (!sent) {
 			// Nothing to talk to. The AI Notes view is resolved lazily, so in a window where it has
-			// never been shown there is no webview to relay through - and that is fixable by the
-			// reader, which makes it worth saying rather than retrying in silence.
-			toFrame(entry, {
-				kind: 'error',
-				problem: 'Open the AI Notes view in the sidebar once to connect'
-			});
+			// never been shown there is no webview to relay through. Opening it once is something this
+			// script can do from here, masked and put back; the message is what is left when it cannot
+			// - no item in the activity bar, or an attempt too recent to repeat. "Not open" rather than
+			// "never opened": a view hidden from the activity bar is disposed the same way.
+			if (!wakeSidePanel()) {
+				toFrame(entry, {
+					kind: 'error',
+					problem:
+						'The AI Notes side panel is not open in this window - open it once from the activity bar to connect.'
+				});
+			}
 		}
+	}
+
+	/**
+	 * Learn which tab this panel belongs to, or notice that its tab has been retitled - only while its
+	 * container is showing, and only from a reading that still holds SETTLE_MS later.
+	 *
+	 * Two readings, because a tab switch is not one write: the tab strip changing, the old container
+	 * being hidden and the new one shown are separate steps, and a reading taken between them could
+	 * name the tab being switched to from the container being switched away from. The same reading a
+	 * quarter of a second later, with the container still showing, is past all of them.
+	 *
+	 * A hidden panel is never read. It keeps its tab and its session, which is exactly what lets
+	 * switching back to it show its own note at once, with nothing to reload.
+	 */
+	function checkTab(entry) {
+		if (entry.stale || entry.settling || !isShowing(entry.overlay)) {
+			return;
+		}
+		const first = readTab(entry.overlay);
+		if (!first) {
+			// Said, but at the retry pace rather than every sweep.
+			if (!entry.bound && Date.now() - entry.lastRegister >= REGISTER_RETRY_MS) {
+				entry.lastRegister = Date.now();
+				toFrame(entry, { kind: 'error', problem: 'could not read this tab’s caption' });
+			}
+			return;
+		}
+		if (entry.bound && first.caption === entry.caption && first.tabKey === entry.tabKey) {
+			return;
+		}
+		entry.settling = setTimeout(() => {
+			entry.settling = null;
+			if (entry.stale || !isShowing(entry.overlay) || !isLive(entry.frame)) {
+				return;
+			}
+			const second = readTab(entry.overlay);
+			if (!second || second.caption !== first.caption || second.tabKey !== first.tabKey) {
+				// Still moving. The next sweep, or VS Code showing this container again, reads anew.
+				return;
+			}
+			console.log(
+				`${TAG} panel ${entry.id} ${entry.bound ? 'rebound' : 'bound'} to tab`,
+				second.tabKey,
+				second.caption
+			);
+			if (!entry.bound) {
+				entry.waitingSince = Date.now();
+			}
+			entry.caption = second.caption;
+			entry.tabKey = second.tabKey;
+			entry.bound = true;
+			register(entry);
+		}, SETTLE_MS);
 	}
 
 	function toFrame(entry, event) {
@@ -630,6 +722,178 @@
 		setTimeout(done, 1200);
 	}
 
+	/** Set while a wake is running, and when the last one started. */
+	let waking = false;
+	let lastWake = 0;
+	/** When this script started, and whether the one unprompted wake has been tried. */
+	const loadedAt = Date.now();
+	let wakeTried = false;
+
+	/** Whether this workbench has a Claude tab at all, in any of its windows. */
+	function anyClaudeTab() {
+		for (const view of liveViews()) {
+			if (view.doc.querySelector(TAB_SELECTOR)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** The activity bar item for a view container, by the label VS Code puts on it. */
+	function activityItem(doc, label) {
+		const bar = doc.querySelector('.part.activitybar');
+		if (!bar) {
+			return null;
+		}
+		for (const el of bar.querySelectorAll('[aria-label], [title]')) {
+			const name = el.getAttribute('aria-label') || el.getAttribute('title') || '';
+			// The label alone, or with a keybinding or a badge after it.
+			if (name.slice(0, label.length) === label) {
+				return el.querySelector('.action-label') || el;
+			}
+		}
+		return null;
+	}
+
+	/** The item the activity bar shows as selected, so it can be pressed again afterwards. */
+	function checkedItem(doc) {
+		const bar = doc.querySelector('.part.activitybar');
+		const item = bar && bar.querySelector('.action-item.checked');
+		return item ? item.querySelector('.action-label') || item : null;
+	}
+
+	/** The container VS Code parks the AI Notes webview in, once that webview exists. */
+	function sidePanelOverlay() {
+		const frame = iframesFor(document, NOTES_EXTENSION)[0];
+		return frame ? frame.closest('.webview-overlay-content') : null;
+	}
+
+	/**
+	 * Hide the parts that would otherwise be seen changing while the side panel is opened and closed
+	 * again: the side bar and the activity bar.
+	 *
+	 * `visibility`, never `display` or a width. Those relayout the workbench, which is the very thing
+	 * that would be seen. It cannot hide everything: with the side bar CLOSED, opening it moves the
+	 * editor, and no styling here can prevent that.
+	 */
+	function mask(doc) {
+		const parts = [];
+		for (const selector of ['.part.sidebar', '.part.activitybar']) {
+			const el = doc.querySelector(selector);
+			if (el) {
+				parts.push({ el, was: el.style.visibility });
+				el.style.visibility = 'hidden';
+			}
+		}
+		return parts;
+	}
+
+	function unmask(parts) {
+		for (const part of parts) {
+			part.el.style.visibility = part.was || '';
+		}
+	}
+
+	/** Whether the AI Notes view is what the side bar is showing right now. */
+	function sidePanelShowing(doc, ours) {
+		const workbench = doc.querySelector('.monaco-workbench');
+		if (workbench && workbench.classList.contains('nosidebar')) {
+			return false;
+		}
+		return checkedItem(doc) === ours;
+	}
+
+	/**
+	 * Open the AI Notes view once, so that its webview exists, and put the side bar back as it was.
+	 *
+	 * The relay IS that webview, and VS Code only creates a view's webview when the view is shown -
+	 * there is no setting for that and no API to create one unseen. The extension cannot do this for
+	 * itself either: it can reveal its own view, but nothing in the extension API says which container
+	 * was showing before or whether the side bar was open, so it could not put anything back. Here in
+	 * the workbench both facts are on screen - the activity bar marks the selected item `checked`, and
+	 * a closed side bar marks the workbench element `nosidebar` - which is why this lives here.
+	 *
+	 * False when it did not even try, which is the caller's cue to say so in the panel instead.
+	 */
+	function wakeSidePanel() {
+		if (waking || Date.now() - lastWake < WAKE_RETRY_MS) {
+			return false;
+		}
+		const doc = document;
+		const ours = activityItem(doc, SIDE_PANEL_LABEL);
+		if (!ours) {
+			console.warn(`${TAG} no "${SIDE_PANEL_LABEL}" item in the activity bar to open`);
+			return false;
+		}
+		waking = true;
+		lastWake = Date.now();
+		const workbench = doc.querySelector('.monaco-workbench');
+		const wasClosed = Boolean(workbench && workbench.classList.contains('nosidebar'));
+		const previous = wasClosed ? null : checkedItem(doc);
+		const focused = doc.activeElement;
+		const masked = mask(doc);
+		console.log(`${TAG} opening the AI Notes view to connect (side bar ${wasClosed ? 'closed' : 'open'})`);
+		pressElement(ours);
+
+		const started = Date.now();
+		const finish = found => {
+			try {
+				// Pressing the selected item again is what closes the side bar, which is the state to
+				// return to when it was closed to begin with.
+				if (wasClosed || !previous || previous === ours) {
+					pressElement(ours);
+				} else if (isLive(previous)) {
+					pressElement(previous);
+				}
+			} catch (err) {
+				console.warn(`${TAG} could not put the side bar back`, err);
+			}
+			// Read back rather than assumed: whether the reader is now looking at the AI Notes view
+			// decides whether its webview may stay hidden. Left hidden while it is on screen would be
+			// an empty panel, which is worse than the flash this avoids.
+			setTimeout(() => {
+				const showing = sidePanelShowing(doc, ours);
+				const overlay = sidePanelOverlay();
+				if (overlay) {
+					overlay.style.visibility = showing ? 'visible' : 'hidden';
+				}
+				unmask(masked);
+				if (focused && typeof focused.focus === 'function') {
+					try {
+						focused.focus();
+					} catch (err) {
+						console.warn(`${TAG} could not restore focus`, err);
+					}
+				}
+				waking = false;
+				console.log(
+					`${TAG} side panel ${found ? 'connected' : 'did not appear'}, ` +
+						`side bar ${showing ? 'still showing AI Notes' : 'restored'}`
+				);
+			}, 60);
+		};
+
+		const step = () => {
+			const overlay = sidePanelOverlay();
+			if (overlay) {
+				// Hidden the moment it exists. VS Code parks it at the window root rather than inside
+				// the side bar, so the mask above does not cover it, and one painted frame of it is
+				// exactly the flash this is here to avoid. The webview keeps loading while hidden -
+				// the view is registered with `retainContextWhenHidden`.
+				overlay.style.visibility = 'hidden';
+				finish(true);
+				return;
+			}
+			if (Date.now() - started >= WAKE_TIMEOUT_MS) {
+				finish(false);
+				return;
+			}
+			setTimeout(step, 50);
+		};
+		setTimeout(step, 50);
+		return true;
+	}
+
 	function panelFor(id) {
 		const matches = panels.filter(entry => entry.id === id);
 		return matches.find(entry => isLive(entry.frame)) || matches[0] || null;
@@ -787,16 +1051,15 @@
 
 	/** Remember this height against the session, so the next tab for it opens the same size. */
 	function sendHeight(entry, height) {
-		const caption = captionFor(entry.overlay);
-		if (!caption) {
+		if (!entry.bound) {
 			return;
 		}
 		toSidePanel({
 			source: 'ainotes-inject',
 			kind: 'height',
 			panel: entry.id,
-			caption,
-			tabKey: tabKeyFor(entry.overlay) || entry.tabKey,
+			caption: entry.caption,
+			tabKey: entry.tabKey,
 			height
 		});
 	}
@@ -825,14 +1088,40 @@
 			connected: false,
 			stale: false,
 			lastRegister: 0,
+			// The tab this panel belongs to, learned while its container was showing and kept while it
+			// is hidden. `bound` says whether they have been learned at all.
+			bound: false,
 			caption: null,
 			tabKey: null,
+			/** The timer of a tab reading waiting to be confirmed, or null. */
+			settling: null,
+			observer: null,
+			/** What the observer last saw, so it acts on a change of visibility and nothing else. */
+			wasShowing: false,
 			loader: null,
-			born: Date.now(),
+			// When this panel started waiting for notes it could have had. Kept current while it is
+			// hidden and unbound: a tab nobody has looked at yet is not stuck.
+			waitingSince: Date.now(),
 			diagnosed: false,
 			height: PANEL_HEIGHT
 		};
 		panels.push(entry);
+
+		// Told the moment VS Code shows this container, so a tab viewed for the first time binds at once
+		// rather than on the next sweep. The `style` attribute of this one element only - never a
+		// subtree, never the workbench, whose constant churn made an earlier observer here unbounded
+		// work - and the callback does nothing unless visibility actually changed, so a style write
+		// for any other reason costs one comparison. Built with the container's own window, as VS Code
+		// builds its own observers for elements that may live in an auxiliary window.
+		const Observer = (overlay.ownerDocument.defaultView || window).MutationObserver;
+		entry.observer = new Observer(() => {
+			const showing = isShowing(overlay);
+			if (showing && !entry.wasShowing) {
+				checkTab(entry);
+			}
+			entry.wasShowing = showing;
+		});
+		entry.observer.observe(overlay, { attributes: true, attributeFilter: ['style'] });
 
 		// A small rounded square with an 'n' in it, matching the controls along the Claude prompt.
 		// Its weight carries one bit of state: bold means this session already has a note, so the
@@ -908,9 +1197,13 @@
 				// means is the extension's business, not this file's.
 				toSidePanel({ source: 'ainotes-inject', kind: 'updateInjections' });
 			} else if (data.kind === 'save') {
-				const caption = captionFor(entry.overlay);
-				if (!caption) {
-					toFrame(entry, { kind: 'error', problem: 'could not read this tab’s caption' });
+				// Filed under the tab this panel is bound to, never a fresh reading: a save can fire just
+				// after its tab was switched away from, when a reading would name the tab now showing.
+				if (!entry.bound) {
+					toFrame(entry, {
+						kind: 'error',
+						problem: 'could not tell which tab this panel is in - your text is unsaved'
+					});
 					return;
 				}
 				markNote(entry, Boolean((data.text || '').trim()));
@@ -921,8 +1214,8 @@
 					source: 'ainotes-inject',
 					kind: 'save',
 					panel: entry.id,
-					caption,
-					tabKey: tabKeyFor(entry.overlay) || entry.tabKey,
+					caption: entry.caption,
+					tabKey: entry.tabKey,
 					text: data.text || ''
 				});
 				if (!sent) {
@@ -1014,7 +1307,12 @@
 
 	/** Forget a panel, by index, saying why. */
 	function forget(index, why) {
-		console.log(`${TAG} forgetting panel ${panels[index].id}: ${why}`);
+		const entry = panels[index];
+		console.log(`${TAG} forgetting panel ${entry.id}: ${why}`);
+		if (entry.observer) {
+			entry.observer.disconnect();
+		}
+		clearTimeout(entry.settling);
 		panels.splice(index, 1);
 	}
 
@@ -1060,40 +1358,58 @@
 
 			// Anything still waiting keeps announcing itself. This is the whole reconnection story:
 			// a reopened Claude tab, a session that had not started yet, a side panel opened later -
-			// all recover here without a round trip or a deadline. And a connected panel whose tab
-			// caption has changed under it re-registers, which covers a container VS Code handed to
-			// a different session and a session that has since been retitled.
+			// all recover here without a round trip or a deadline. Tabs are read only for panels that
+			// are showing: an unbound one learns its tab, a bound one notices a retitle. A hidden panel
+			// is left exactly as it is - see `isShowing` for why reading it would be wrong.
 			const now = Date.now();
 			for (const entry of panels) {
 				if (entry.stale) {
 					continue;
 				}
-				if (!entry.connected) {
-					if (now - entry.lastRegister >= REGISTER_RETRY_MS) {
-						register(entry);
-					}
-					// A panel that has been asking for a while and getting nowhere reports its whole
-					// state once, so "loading for ever" names its own cause instead of being silent.
-					if (!entry.diagnosed && entry.born && now - entry.born >= STUCK_AFTER_MS) {
-						entry.diagnosed = true;
-						console.warn(`${TAG} panel stuck, state follows`, {
-							panel: entry.id,
-							caption: captionFor(entry.overlay),
-							window: windowIdOf(entry.overlay),
-							overlayLive: isLive(entry.overlay),
-							frameLive: isLive(entry.frame),
-							frameWindow: Boolean(entry.frame.contentWindow),
-							sidePanelFrames: iframesFor(document, NOTES_EXTENSION).length,
-							secondsWaiting: Math.round((now - entry.born) / 1000)
-						});
-					}
-					continue;
-				}
-				const caption = captionFor(entry.overlay);
-				if (caption && caption !== entry.caption) {
-					console.log(`${TAG} caption changed, re-registering`, entry.id);
+				if (!entry.bound || entry.connected) {
+					checkTab(entry);
+				} else if (now - entry.lastRegister >= REGISTER_RETRY_MS) {
 					register(entry);
 				}
+				if (entry.connected) {
+					continue;
+				}
+				if (!entry.bound && !isShowing(entry.overlay)) {
+					entry.waitingSince = now;
+					continue;
+				}
+				// A panel that has been asking for a while and getting nowhere reports its whole
+				// state once, so "loading for ever" names its own cause instead of being silent.
+				if (!entry.diagnosed && now - entry.waitingSince >= STUCK_AFTER_MS) {
+					entry.diagnosed = true;
+					console.warn(`${TAG} panel stuck, state follows`, {
+						panel: entry.id,
+						bound: entry.bound,
+						caption: entry.caption,
+						showing: isShowing(entry.overlay),
+						window: windowIdOf(entry.overlay),
+						overlayLive: isLive(entry.overlay),
+						frameLive: isLive(entry.frame),
+						frameWindow: Boolean(entry.frame.contentWindow),
+						sidePanelFrames: iframesFor(document, NOTES_EXTENSION).length,
+						secondsWaiting: Math.round((now - entry.waitingSince) / 1000)
+					});
+				}
+			}
+
+			// The relay is the side panel's webview, and VS Code makes it only when that view is shown.
+			// Opened here rather than when a panel first needs it: a Claude tab restored in the
+			// background has no panel until it is clicked, so waiting would move this to the middle of
+			// the reader's work, where it is most visible. Once per window, and only where there is a
+			// Claude tab to serve.
+			if (
+				!wakeTried &&
+				Date.now() - loadedAt >= WAKE_AFTER_LOAD_MS &&
+				iframesFor(document, NOTES_EXTENSION).length === 0 &&
+				anyClaudeTab()
+			) {
+				wakeTried = true;
+				wakeSidePanel();
 			}
 
 			// Last, so a tab that appeared this pass is reported together with the panel it got.

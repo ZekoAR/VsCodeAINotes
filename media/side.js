@@ -285,6 +285,37 @@
 			applyGeneralOpen(Boolean(message.open));
 			return;
 		}
+		if (message && message.type === 'snippets') {
+			snippets = Array.isArray(message.snippets) ? message.snippets : [];
+			reconcileSelection();
+			renderSnippets();
+			return;
+		}
+		if (message && message.type === 'snippetSaved') {
+			// An add, or the edit an Update press ended, was stored, and either way the form starts over
+			// as a fresh Add. Cleared only when it still holds what was stored: a failed write sends
+			// nothing, so the text stays, and anything typed while the write was in flight stays too.
+			if (snippetTitle.value === message.title && snippetPrompt.value === message.prompt) {
+				clearTimeout(snippetSaveTimer);
+				snippetSaveTimer = undefined;
+				selectedId = null;
+				insertBeforeId = null;
+				fillForm('', '');
+				syncForm();
+			}
+			return;
+		}
+		if (message && message.type === 'snippetInsert') {
+			// Leaving an edit empties the fields, as a click on the selected row does. A draft already
+			// being typed as a new snippet is kept - it is what gets inserted.
+			if (selectedId !== null) {
+				deselectSnippet();
+			}
+			insertBeforeId = typeof message.beforeId === 'string' ? message.beforeId : null;
+			syncForm();
+			snippetTitle.focus();
+			return;
+		}
 		if (message && message.type === 'rows') {
 			sessions = message.rows || [];
 			listed = Boolean(message.listed);
@@ -499,6 +530,407 @@
 		// reopened since the list was built - a new editor gets a new key.
 		toInjected({ kind: 'focusTab', key, caption });
 	}
+
+	// ---------------------------------------------------------------- tabs
+
+	const tabButtons = /** @type {HTMLButtonElement[]} */ (Array.from(document.querySelectorAll('.tab')));
+
+	/**
+	 * Show one tab and hide the other. Hiding only: nothing is torn down, because the Session Notes
+	 * tab is also the relay every injected panel talks through, and it must keep running unseen.
+	 */
+	function selectTab(name) {
+		for (const button of tabButtons) {
+			const on = button.dataset.tab === name;
+			button.setAttribute('aria-selected', String(on));
+			const panel = document.getElementById(button.getAttribute('aria-controls') || '');
+			if (panel) {
+				panel.hidden = !on;
+			}
+		}
+	}
+
+	for (const button of tabButtons) {
+		button.addEventListener('click', () => {
+			if (button.getAttribute('aria-selected') === 'true') {
+				return;
+			}
+			selectTab(button.dataset.tab);
+			// A card left up would float over the other tab's content.
+			hideTip();
+			vscode.postMessage({ type: 'tabSelected', tab: button.dataset.tab });
+		});
+	}
+
+	// The extension renders the remembered tab into the page, so the first paint is already right;
+	// this only brings the buttons and panels into step with it.
+	selectTab(document.body.dataset.tab === 'snippets' ? 'snippets' : 'notes');
+
+	// ---------------------------------------------------------------- prompt snippets
+
+	const snippetList = /** @type {HTMLElement} */ (document.getElementById('snippet-list'));
+	const snippetForm = /** @type {HTMLFormElement} */ (document.getElementById('snippet-form'));
+	const snippetTitle = /** @type {HTMLInputElement} */ (document.getElementById('snippet-title'));
+	const snippetPrompt = /** @type {HTMLTextAreaElement} */ (document.getElementById('snippet-prompt'));
+	const snippetSave = /** @type {HTMLButtonElement} */ (document.getElementById('snippet-save'));
+
+	/** Every stored snippet, as the extension last pushed them. @type {Array<{id: string, title: string, prompt: string}>} */
+	let snippets = [];
+	/** The snippet the form is editing, or null when the form adds a new one. @type {string | null} */
+	let selectedId = null;
+	/** What the fields were filled with, so a later push can tell typed text from loaded text. */
+	let loaded = { title: '', prompt: '' };
+	/**
+	 * What a deselecting click cleared out of the fields, kept in case that click was the first half
+	 * of a double click - which must copy and leave the row selected, typed changes and all.
+	 * @type {{id: string, title: string, prompt: string, loaded: {title: string, prompt: string}} | null}
+	 */
+	let undoDeselect = null;
+	/**
+	 * The snippet a new one goes above, set by Insert New... on its row, or null to add at the end.
+	 * That row carries a line along its top until the snippet is added or the placement cancelled.
+	 * @type {string | null}
+	 */
+	let insertBeforeId = null;
+	/** Armed while an edit to the selected snippet waits for a pause in typing to be saved. */
+	let snippetSaveTimer;
+
+	/** Only when different: assigning a field's value moves its caret to the end. */
+	function setField(field, value) {
+		if (field.value !== value) {
+			field.value = value;
+		}
+	}
+
+	function fillForm(title, prompt) {
+		setField(snippetTitle, title);
+		setField(snippetPrompt, prompt);
+		loaded = { title, prompt };
+	}
+
+	function formModified() {
+		return snippetTitle.value !== loaded.title || snippetPrompt.value !== loaded.prompt;
+	}
+
+	/** The button, the highlighted row and the insertion line, derived from the state above. */
+	function syncForm() {
+		snippetSave.textContent = selectedId === null ? 'Add' : 'Update';
+		// Update is the way back to Add, and that is never something to refuse.
+		snippetSave.disabled = selectedId === null && !snippetPrompt.value.trim();
+		for (const row of Array.from(snippetList.children)) {
+			const el = /** @type {HTMLElement} */ (row);
+			if (el.dataset.id !== undefined) {
+				const on = el.dataset.id === selectedId;
+				el.classList.toggle('selected', on);
+				el.setAttribute('aria-selected', String(on));
+				el.classList.toggle('insert-before', el.dataset.id === insertBeforeId);
+			}
+		}
+	}
+
+	/**
+	 * Send the snippet being edited as it stands. `done` marks an Update press, which the extension
+	 * acknowledges so the form can clear. False when there was nothing to send: no snippet is being
+	 * edited, or its prompt is empty, which is never stored.
+	 */
+	function sendSnippetEdit(done) {
+		clearTimeout(snippetSaveTimer);
+		snippetSaveTimer = undefined;
+		if (selectedId === null || !snippetPrompt.value.trim()) {
+			return false;
+		}
+		vscode.postMessage({
+			type: 'snippetUpdate',
+			id: selectedId,
+			title: snippetTitle.value,
+			prompt: snippetPrompt.value,
+			done
+		});
+		return true;
+	}
+
+	/** Save a waiting edit now, before the form moves away from the snippet it belongs to. */
+	function flushSnippetEdit() {
+		if (snippetSaveTimer !== undefined) {
+			sendSnippetEdit(false);
+		}
+	}
+
+	function selectSnippet(snippet) {
+		flushSnippetEdit();
+		selectedId = snippet.id;
+		insertBeforeId = null;
+		fillForm(snippet.title, snippet.prompt);
+		syncForm();
+	}
+
+	function deselectSnippet() {
+		flushSnippetEdit();
+		selectedId = null;
+		insertBeforeId = null;
+		fillForm('', '');
+		syncForm();
+	}
+
+	/**
+	 * Keep the form honest after the list changed underneath it - an update landing, a remove, or
+	 * another window writing the file.
+	 *
+	 * Typed text is never thrown away. A selected snippet that has gone takes the form back to Add,
+	 * and only empties the fields when they still hold what was loaded; with changes in them they
+	 * stay, ready to be added again. A snippet still there refreshes the fields when nothing was
+	 * typed, and adopts what is stored when it now matches the fields - which is what an edit saved
+	 * as it was typed looks like, arriving back.
+	 */
+	function reconcileSelection() {
+		if (insertBeforeId !== null && !snippets.some(candidate => candidate.id === insertBeforeId)) {
+			// The row it was to go above has gone, so the new snippet goes at the end instead.
+			insertBeforeId = null;
+		}
+		if (selectedId === null) {
+			return;
+		}
+		const snippet = snippets.find(candidate => candidate.id === selectedId);
+		const modified = formModified();
+		if (!snippet) {
+			selectedId = null;
+			// A waiting edit has nowhere to go any more.
+			clearTimeout(snippetSaveTimer);
+			snippetSaveTimer = undefined;
+			if (modified) {
+				loaded = { title: '', prompt: '' };
+			} else {
+				fillForm('', '');
+			}
+			return;
+		}
+		if (snippetTitle.value.trim() === snippet.title.trim() && snippetPrompt.value === snippet.prompt) {
+			// Adopted as the fields stand, so a trailing space the store trimmed off the title is not
+			// taken out from under someone still typing it.
+			loaded = { title: snippetTitle.value, prompt: snippetPrompt.value };
+		} else if (!modified) {
+			fillForm(snippet.title, snippet.prompt);
+		}
+	}
+
+	/** Rebuilt whole on each push; the list is small, and the scroll position and focus survive it. */
+	function renderSnippets() {
+		const scroll = snippetList.scrollTop;
+		const active = /** @type {HTMLElement | null} */ (document.activeElement);
+		const focusedId = active && snippetList.contains(active) ? active.dataset.id : undefined;
+		if (snippets.length === 0) {
+			const none = document.createElement('div');
+			none.className = 'row-none';
+			none.textContent = 'No prompt snippets yet. Write one below and press Add.';
+			snippetList.replaceChildren(none);
+		} else {
+			snippetList.replaceChildren(...snippets.map(makeSnippetRow));
+		}
+		snippetList.scrollTop = scroll;
+		if (focusedId !== undefined) {
+			const again = Array.from(snippetList.children).find(
+				row => /** @type {HTMLElement} */ (row).dataset.id === focusedId
+			);
+			if (again) {
+				/** @type {HTMLElement} */ (again).focus();
+			}
+		}
+		syncForm();
+	}
+
+	/**
+	 * One snippet: its title, and underneath, the prompt text the title does not already show.
+	 *
+	 * The right-click menu is VS Code's own. `data-vscode-context` is what it reads: the section
+	 * picks the menu entries, the id tells the command which snippet, and the last flag drops
+	 * VS Code's default Cut/Copy/Paste, which mean nothing on a row.
+	 */
+	/** @param {{id: string, title: string, prompt: string}} snippet */
+	function makeSnippetRow(snippet) {
+		const row = document.createElement('div');
+		row.className = 'row';
+		row.setAttribute('role', 'option');
+		row.tabIndex = 0;
+		row.dataset.id = snippet.id;
+		row.dataset.vscodeContext = JSON.stringify({
+			webviewSection: 'snippet',
+			snippetId: snippet.id,
+			preventDefaultContextMenuItems: true
+		});
+
+		const lines = snippet.prompt.trim().split(/\r?\n/);
+		const titled = Boolean(snippet.title.trim());
+		const title = document.createElement('div');
+		title.className = 'row-title';
+		// textContent, never innerHTML: a snippet is whatever was typed or pasted into it.
+		title.textContent = titled ? snippet.title : lines[0];
+
+		const meta = document.createElement('div');
+		meta.className = 'row-meta';
+		const rest = (titled ? snippet.prompt : lines.slice(1).join(' ')).replace(/\s+/g, ' ').trim();
+		// A no-break space rather than nothing, so an untitled one-line prompt keeps the row height.
+		meta.textContent = rest || ' ';
+
+		row.append(title, meta);
+
+		row.addEventListener('click', event => {
+			// The second click of a double click. The first already did what a click does, and
+			// toggling again would undo it.
+			if (event.detail > 1) {
+				return;
+			}
+			if (selectedId === snippet.id) {
+				undoDeselect = {
+					id: snippet.id,
+					title: snippetTitle.value,
+					prompt: snippetPrompt.value,
+					loaded
+				};
+				deselectSnippet();
+			} else {
+				undoDeselect = null;
+				selectSnippet(snippet);
+			}
+		});
+		row.addEventListener('dblclick', () => {
+			if (undoDeselect && undoDeselect.id === snippet.id) {
+				// The first click deselected a row that was already selected. Put back exactly what
+				// the fields held, rather than reloading and losing what was typed.
+				selectedId = snippet.id;
+				setField(snippetTitle, undoDeselect.title);
+				setField(snippetPrompt, undoDeselect.prompt);
+				loaded = undoDeselect.loaded;
+				syncForm();
+			} else if (selectedId !== snippet.id) {
+				selectSnippet(snippet);
+			}
+			undoDeselect = null;
+			// The stored prompt, not the fields: the copy is of the snippet, whatever is being edited.
+			vscode.postMessage({ type: 'snippetCopy', id: snippet.id });
+		});
+		row.addEventListener('keydown', event => {
+			if (event.key === 'Enter' || event.key === ' ') {
+				event.preventDefault();
+				if (selectedId === snippet.id) {
+					deselectSnippet();
+				} else {
+					selectSnippet(snippet);
+				}
+			}
+		});
+		return row;
+	}
+
+	snippetForm.addEventListener('submit', event => {
+		event.preventDefault();
+		const title = snippetTitle.value;
+		const prompt = snippetPrompt.value;
+		// Nothing is changed here on sending. The form clears when the extension says the text is
+		// stored, so a write that failed leaves it where it was.
+		if (selectedId === null) {
+			if (!prompt.trim()) {
+				return;
+			}
+			vscode.postMessage({
+				type: 'snippetAdd',
+				title,
+				prompt,
+				beforeId: insertBeforeId === null ? undefined : insertBeforeId
+			});
+		} else if (!sendSnippetEdit(true)) {
+			// Edits are saved as they are typed, so Update is only the way back to Add. With the prompt
+			// emptied there is nothing to store and nothing to wait for; the snippet keeps the last
+			// prompt it had.
+			deselectSnippet();
+		}
+	});
+
+	/**
+	 * Typing in the fields. The button follows, and a snippet being edited is saved as it goes - a
+	 * moment after each pause, at the folder note's pace, rather than a whole-file write per keystroke.
+	 */
+	function onSnippetInput() {
+		syncForm();
+		if (selectedId === null) {
+			return;
+		}
+		clearTimeout(snippetSaveTimer);
+		snippetSaveTimer = setTimeout(() => sendSnippetEdit(false), GENERAL_SAVE_MS);
+	}
+
+	snippetTitle.addEventListener('input', onSnippetInput);
+	snippetPrompt.addEventListener('input', onSnippetInput);
+	// Ahead of VS Code opening its menu, so Copy to clipboard copies what was just typed. Not
+	// cancelled: VS Code only shows its menu for an event nobody prevented.
+	snippetList.addEventListener('contextmenu', flushSnippetEdit);
+
+	// The splitter above the form: the same control as the folder note's, trading list room for
+	// prompt room. The stored height is rendered into the page, so it applies before the first paint.
+	const snippetSplit = /** @type {HTMLElement} */ (document.getElementById('snippet-split'));
+	/** Roughly two lines: the prompt keeps this however far the form is squeezed. */
+	const SNIPPET_PROMPT_MIN = 48;
+	/** What the list keeps however far the form is dragged up. main.css caps the form with the same number. */
+	const SNIPPET_LIST_MIN = 60;
+
+	/** One place that writes the height, so the flex basis and the inline height cannot disagree. */
+	function setSnippetFormHeight(height) {
+		const px = Math.round(height) + 'px';
+		snippetForm.style.flexBasis = px;
+		snippetForm.style.height = px;
+	}
+
+	const storedFormHeight = Number(snippetForm.dataset.height);
+	if (storedFormHeight > 0) {
+		setSnippetFormHeight(storedFormHeight);
+	}
+
+	// Pointer capture, so the drag survives the cursor leaving a 4px strip; committed once on
+	// release, because persisting on every pointermove would be a write per frame.
+	snippetSplit.addEventListener('pointerdown', event => {
+		event.preventDefault();
+		snippetSplit.setPointerCapture(event.pointerId);
+		snippetSplit.classList.add('dragging');
+		const startY = event.clientY;
+		const startH = snippetForm.getBoundingClientRect().height;
+		// Everything in the form that is not the prompt - title, button, gaps, padding - measured
+		// rather than assumed, so the floor holds whatever the font sizes are.
+		const minH = startH - snippetPrompt.getBoundingClientRect().height + SNIPPET_PROMPT_MIN;
+		const panel = /** @type {HTMLElement} */ (snippetForm.parentElement);
+		const maxH = Math.max(minH, panel.clientHeight - snippetSplit.offsetHeight - SNIPPET_LIST_MIN);
+		let height = startH;
+
+		const onMove = move => {
+			height = Math.min(maxH, Math.max(minH, startH - (move.clientY - startY)));
+			setSnippetFormHeight(height);
+		};
+		const onUp = () => {
+			snippetSplit.classList.remove('dragging');
+			snippetSplit.removeEventListener('pointermove', onMove);
+			vscode.postMessage({ type: 'snippetsHeight', height: Math.round(height) });
+		};
+		snippetSplit.addEventListener('pointermove', onMove);
+		snippetSplit.addEventListener('pointerup', onUp, { once: true });
+		snippetSplit.addEventListener('pointercancel', onUp, { once: true });
+	});
+
+	for (const field of [snippetTitle, snippetPrompt]) {
+		field.addEventListener('keydown', event => {
+			if (event.key !== 'Escape') {
+				return;
+			}
+			if (selectedId !== null) {
+				event.preventDefault();
+				deselectSnippet();
+			} else if (insertBeforeId !== null) {
+				// Cancels the placement only. What was typed stays, and Add appends it.
+				event.preventDefault();
+				insertBeforeId = null;
+				syncForm();
+			}
+		});
+	}
+
+	renderSnippets();
 
 	vscode.postMessage({ type: 'ready' });
 

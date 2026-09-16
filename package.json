@@ -46,6 +46,21 @@
         "title": "Open Notes File",
         "category": "AI Notes",
         "icon": "$(go-to-file)"
+      },
+      {
+        "command": "ainotes.snippetInsert",
+        "title": "Insert New...",
+        "category": "AI Notes"
+      },
+      {
+        "command": "ainotes.snippetCopy",
+        "title": "Copy to clipboard",
+        "category": "AI Notes"
+      },
+      {
+        "command": "ainotes.snippetRemove",
+        "title": "Remove",
+        "category": "AI Notes"
       }
     ],
     "menus": {
@@ -54,6 +69,37 @@
           "command": "ainotes.openStoreFile",
           "when": "view == ainotes.sidePanel",
           "group": "navigation@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "ainotes.snippetInsert",
+          "when": "false"
+        },
+        {
+          "command": "ainotes.snippetCopy",
+          "when": "false"
+        },
+        {
+          "command": "ainotes.snippetRemove",
+          "when": "false"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "ainotes.snippetInsert",
+          "when": "webviewId == 'ainotes.sidePanel' && (webviewSection == 'snippet' || webviewSection == 'snippetList')",
+          "group": "snippet@0"
+        },
+        {
+          "command": "ainotes.snippetCopy",
+          "when": "webviewId == 'ainotes.sidePanel' && webviewSection == 'snippet'",
+          "group": "snippet@1"
+        },
+        {
+          "command": "ainotes.snippetRemove",
+          "when": "webviewId == 'ainotes.sidePanel' && webviewSection == 'snippet'",
+          "group": "snippet@2"
         }
       ]
     },

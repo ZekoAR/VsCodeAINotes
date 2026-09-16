@@ -2,22 +2,35 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { NotesWorkspace } from './notesWorkspace';
 import { SidePanelProvider } from './sidePanel';
+import { SnippetLibrary, registerSnippetCommands } from './snippets';
 import { NotesStore, importLegacyNotes, notesFileFor } from './store';
 
 let workspace: NotesWorkspace | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
+	// Prompt snippets belong to no folder, so they are set up ahead of the branch below and work in a
+	// window with nothing open. Their commands are registered in each branch, beside the side panel
+	// that Insert New... talks to.
+	const snippets = new SnippetLibrary();
+	context.subscriptions.push(snippets);
+
 	const folder = vscode.workspace.workspaceFolders?.[0];
 	if (!folder) {
 		// Nothing to store notes beside. Register the side panel anyway: a view whose provider never
 		// registers shows a loading bar forever, and VS Code restarts the extension host when a
 		// folder is opened into this window, so activation runs again with one.
-		const emptyPanel = new SidePanelProvider(context.extensionUri, undefined);
+		const emptyPanel = new SidePanelProvider(
+			context.extensionUri,
+			undefined,
+			snippets,
+			context.workspaceState
+		);
 		context.subscriptions.push(
 			emptyPanel,
 			vscode.window.registerWebviewViewProvider(SidePanelProvider.viewType, emptyPanel, {
 				webviewOptions: { retainContextWhenHidden: true }
-			})
+			}),
+			...registerSnippetCommands(snippets, id => emptyPanel.insertSnippet(id))
 		);
 		// Register the commands anyway so they explain themselves.
 		context.subscriptions.push(
@@ -58,7 +71,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	// Notes live in panels injected into the Claude tabs themselves, so the side panel is both the
 	// window's status display and the relay those panels reach the notes file through.
-	const sidePanel = new SidePanelProvider(context.extensionUri, workspace, context.workspaceState);
+	const sidePanel = new SidePanelProvider(
+		context.extensionUri,
+		workspace,
+		snippets,
+		context.workspaceState
+	);
 
 	context.subscriptions.push(
 		sidePanel,
@@ -69,6 +87,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.window.registerWebviewViewProvider(SidePanelProvider.viewType, sidePanel, {
 			webviewOptions: { retainContextWhenHidden: true }
 		}),
+		...registerSnippetCommands(snippets, id => sidePanel.insertSnippet(id)),
 		vscode.commands.registerCommand('ainotes.save', () => workspace?.saveNow()),
 		vscode.commands.registerCommand('ainotes.openStoreFile', async () => {
 			workspace?.saveNow();
