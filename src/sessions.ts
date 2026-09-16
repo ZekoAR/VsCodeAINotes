@@ -27,6 +27,13 @@ export interface ClaudeSession {
 	lastActivity?: number;
 	/** The session's own title, as Claude Code writes it into the transcript. */
 	title?: string;
+	/** The last prompt Claude Code recorded, which it shows for a session that has no title. */
+	lastPrompt?: string;
+	/**
+	 * A `summary` record's text. A session teleported from claude.ai carries its title here and in
+	 * no title record at all.
+	 */
+	summary?: string;
 	/** First human prompt of the session, used only when the session has no title yet. */
 	firstPrompt?: string;
 	transcriptPath?: string;
@@ -208,15 +215,26 @@ export function liveSessionName(sessionId: string, claudeHomeOverride?: string):
  */
 const TITLE_SCAN_BYTES = 512 * 1024;
 
+/** What the tail of a transcript says a session is called. */
+interface TranscriptTail {
+	title?: string;
+	lastPrompt?: string;
+	summary?: string;
+}
+
 /**
- * The session's own title, read from the tail of its transcript.
+ * The session's own title, and the two things Claude Code shows in its place, read from the tail
+ * of its transcript.
  *
  * Claude Code writes an `ai-title` record once a session's topic is clear and rewrites it as the
  * topic moves, and a `custom-title` record when the session is renamed by hand. The last of each
- * wins, and a hand-written rename beats the generated title - the same precedence the Claude Code
- * extension itself uses.
+ * wins, and a hand-written rename beats the generated title. Without either, the Claude Code
+ * extension (2.1.272, read in its bundle) falls back to the last `last-prompt` record, then to the
+ * last `summary` record, then to the first prompt - and a session teleported from claude.ai has
+ * no title record at all, only a `summary`. Reading the title records alone is what left such a
+ * session matching no tab.
  */
-function readTranscriptTitle(transcriptPath: string): string | undefined {
+function readTranscriptTail(transcriptPath: string): TranscriptTail {
 	let fd: number | undefined;
 	try {
 		fd = fs.openSync(transcriptPath, 'r');
@@ -227,10 +245,20 @@ function readTranscriptTitle(transcriptPath: string): string | undefined {
 
 		let custom: string | undefined;
 		let generated: string | undefined;
+		let lastPrompt: string | undefined;
+		let summary: string | undefined;
 		for (const line of buf.toString('utf8').split('\n')) {
-			// A title record is a rare, tiny line among megabytes of messages, so reject on a
-			// substring before paying for a parse.
-			if (!line.startsWith('{') || !line.includes('-title"')) {
+			// These records are rare, tiny lines among megabytes of messages, so reject on a
+			// substring before paying for a parse. Inside a message's text the same words are
+			// escaped (`\"last-prompt\"`), so none of these substrings matches them there.
+			if (
+				!line.startsWith('{') ||
+				!(
+					line.includes('-title"') ||
+					line.includes('"last-prompt"') ||
+					line.includes('"type":"summary"')
+				)
+			) {
 				continue;
 			}
 			let rec: Record<string, unknown>;
@@ -244,12 +272,19 @@ function readTranscriptTitle(transcriptPath: string): string | undefined {
 				custom = rec.customTitle;
 			} else if (rec.type === 'ai-title' && typeof rec.aiTitle === 'string') {
 				generated = rec.aiTitle;
+			} else if (rec.type === 'last-prompt' && typeof rec.lastPrompt === 'string') {
+				lastPrompt = rec.lastPrompt;
+			} else if (rec.type === 'summary' && typeof rec.summary === 'string') {
+				summary = rec.summary;
 			}
 		}
-		const title = custom ?? generated;
-		return title ? collapse(title) || undefined : undefined;
+		return {
+			title: collapse(custom ?? generated ?? '') || undefined,
+			lastPrompt: collapse(lastPrompt ?? '') || undefined,
+			summary: collapse(summary ?? '') || undefined
+		};
 	} catch {
-		return undefined;
+		return {};
 	} finally {
 		if (fd !== undefined) {
 			try {
@@ -262,9 +297,10 @@ function readTranscriptTitle(transcriptPath: string): string | undefined {
 }
 
 /**
- * What to call a session on screen, resolved from its transcript: its title, else the first thing
- * the human asked it. Both survive the session exiting and both survive it being restarted, which
- * is why neither is the pretty name in the live registry - that one belongs to a process.
+ * What to call a session on screen, resolved from its transcript, in Claude Code's own order: its
+ * title, its last prompt, its summary, the first thing the human asked it. All of them survive the
+ * session exiting and being restarted, which is why none is the pretty name in the live registry -
+ * that one belongs to a process.
  */
 export function lookupSessionLabel(
 	sessionId: string,
@@ -273,7 +309,8 @@ export function lookupSessionLabel(
 ): string | undefined {
 	const home = claudeHome(claudeHomeOverride);
 	const transcript = path.join(projectTranscriptDir(home, workspaceRoot), `${sessionId}.jsonl`);
-	return readTranscriptTitle(transcript) ?? readFirstPrompt(transcript);
+	const tail = readTranscriptTail(transcript);
+	return tail.title ?? tail.lastPrompt ?? tail.summary ?? readFirstPrompt(transcript);
 }
 
 const FIRST_PROMPT_SCAN_BYTES = 256 * 1024;
@@ -431,7 +468,10 @@ export function scanSessions(options: ScanOptions): ClaudeSession[] {
 		if (!session.transcriptPath) {
 			continue;
 		}
-		session.title = readTranscriptTitle(session.transcriptPath);
+		const tail = readTranscriptTail(session.transcriptPath);
+		session.title = tail.title;
+		session.lastPrompt = tail.lastPrompt;
+		session.summary = tail.summary;
 		if (!session.firstPrompt) {
 			// Read even when a title was found: the picker shows it as the row's detail line, and
 			// it is the fallback label for a session too young to have been titled.
@@ -441,15 +481,35 @@ export function scanSessions(options: ScanOptions): ClaudeSession[] {
 	return [...live, ...rest];
 }
 
-/** The one-line label for a session: its title, else its first prompt, else its id. */
+/**
+ * The one-line label for a session, in the order Claude Code picks its own: title, last prompt,
+ * summary, first prompt - else the id.
+ */
 export function sessionLabel(session: ClaudeSession): string {
+	const name = session.title ?? session.lastPrompt ?? session.summary ?? session.firstPrompt;
+	return name ? truncate(name, 60) : session.sessionId.slice(0, 8);
+}
+
+/**
+ * Every text a Claude Code tab can be showing for this session, untruncated.
+ *
+ * The tab shows the session's `summary` field in the Claude webview, and what fills it depends on
+ * how the tab got the session (read in the 2.1.272 bundle): a title once there is one; before
+ * that, the prompt that started it in this tab, or - for a session loaded from the list - the last
+ * prompt, else a teleported session's summary. So a titled session answers to its title alone,
+ * and an untitled one to any of the other three.
+ *
+ * Kept that narrow on purpose. A titled session's last prompt is often a word like "go", and
+ * letting it answer to that would hand it every untitled tab that happens to say the same.
+ */
+export function sessionNames(session: ClaudeSession): string[] {
 	if (session.title) {
-		return truncate(session.title, 60);
+		return [session.title];
 	}
-	if (session.firstPrompt) {
-		return truncate(session.firstPrompt, 60);
-	}
-	return session.sessionId.slice(0, 8);
+	const names = [session.lastPrompt, session.summary, session.firstPrompt].filter(
+		(name): name is string => Boolean(name)
+	);
+	return [...new Set(names)];
 }
 
 export function truncate(text: string, max: number): string {

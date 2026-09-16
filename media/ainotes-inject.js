@@ -1366,9 +1366,20 @@
 				if (entry.stale) {
 					continue;
 				}
-				if (!entry.bound || entry.connected) {
-					checkTab(entry);
-				} else if (now - entry.lastRegister >= REGISTER_RETRY_MS) {
+				// Every panel reads its tab, including one the extension answered with an error. A new
+				// tab binds while it is still captioned "Claude Code", is told no session matches, and
+				// is retitled a moment later - skipping the read here left it re-sending "Claude Code"
+				// for as long as it stayed on screen. `checkTab` returns at once when nothing changed.
+				checkTab(entry);
+				// The retry re-sends what the panel is bound to, so it waits while a new reading is
+				// settling: that reading registers by itself, and the old caption would only fetch
+				// the error again.
+				if (
+					entry.bound &&
+					!entry.connected &&
+					!entry.settling &&
+					now - entry.lastRegister >= REGISTER_RETRY_MS
+				) {
 					register(entry);
 				}
 				if (entry.connected) {

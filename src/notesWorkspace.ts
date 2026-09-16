@@ -8,7 +8,8 @@ import {
 	lookupSessionLabel,
 	liveSessionName,
 	scanSessions,
-	sessionLabel
+	sessionLabel,
+	sessionNames
 } from './sessions';
 import { BoundSession, Note, NotesDoc, NotesStore, newNote } from './store';
 
@@ -39,6 +40,8 @@ export interface NoteChange {
 export interface SessionRow {
 	id: string;
 	label: string;
+	/** Every text a Claude tab can be captioned with for this session - see `sessionNames`. */
+	names: string[];
 	live: boolean;
 	lastActivity?: number;
 	pid?: number;
@@ -247,6 +250,7 @@ export class NotesWorkspace implements vscode.Disposable {
 			this.scanned.map(session => ({
 				id: session.sessionId,
 				label: sessionLabel(session),
+				names: sessionNames(session),
 				live: session.live,
 				lastActivity: session.lastActivity ?? session.startedAt,
 				pid: session.pid

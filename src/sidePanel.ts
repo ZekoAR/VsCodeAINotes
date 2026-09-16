@@ -19,16 +19,26 @@ const INJECT_MARKER = '<!-- AI Notes spike -->';
  * with the same caption take one session each. Which is the whole point - a caption is not an
  * identity, and Claude Code will happily give two sessions the same title.
  *
- * The two passes are treated differently on purpose. Titles that are EXACTLY equal are
+ * A caption is compared against every text the tab could be showing for a session (`names`), not
+ * the one label the panel lists it under: an untitled session's tab can show its first prompt, its
+ * last prompt or a teleported session's summary, and the label is only one of those.
+ *
+ * The two passes are treated differently on purpose. Names that are EXACTLY equal are
  * indistinguishable by definition, so all of them are offered and any one-to-one assignment is as
- * good as another. A truncated caption - VS Code cuts a long one with an ellipsis, so
- * `Claude capabilities over…` - is matched by prefix, and there the sessions ARE distinguishable:
- * two different titles sharing an opening is a tie, and guessing would file a note against the
- * wrong session. That still resolves to nothing.
+ * good as another. A truncated caption - Claude Code cuts anything over 25 characters to its first
+ * 24 and an ellipsis, so `Claude capabilities over…` - is matched by prefix, and there the
+ * sessions ARE distinguishable: two different names sharing an opening is a tie, and guessing would
+ * file a note against the wrong session. That still resolves to nothing.
+ *
+ * Whitespace is collapsed first, because the names are: a prompt with a line break in its first 24
+ * characters reaches the tab with the break still in it.
  */
-function matchSessions<T extends { label: string }>(caption: string, sessions: T[]): T[] {
-	const wanted = caption.trim();
-	const exact = sessions.filter(session => session.label.trim() === wanted);
+function matchSessions<T extends { names: string[] }>(caption: string, sessions: T[]): T[] {
+	const wanted = caption.replace(/\s+/g, ' ').trim();
+	if (!wanted) {
+		return [];
+	}
+	const exact = sessions.filter(session => session.names.includes(wanted));
 	if (exact.length > 0) {
 		return exact;
 	}
@@ -36,7 +46,7 @@ function matchSessions<T extends { label: string }>(caption: string, sessions: T
 	if (!stem || stem === wanted) {
 		return [];
 	}
-	const hits = sessions.filter(session => session.label.trim().startsWith(stem));
+	const hits = sessions.filter(session => session.names.some(name => name.startsWith(stem)));
 	return hits.length === 1 ? hits : [];
 }
 
@@ -787,13 +797,13 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 	/**
 	 * The session a caption names, or the only one running here.
 	 *
-	 * Three attempts, weakest last. The exact match is the only one that is certain. VS Code's tab
-	 * caption for a long title is truncated with an ellipsis - measured `Claude capabilities over…`,
-	 * in `aria-label` as well as in the label text, with no untruncated copy anywhere in the DOM -
-	 * and `sessionIdForLabel` compares exactly, so a long title never resolves without the prefix
-	 * pass. The sole-live-session fallback then covers a tab still captioned "Claude Code", which is
-	 * what `resolveSession` has always leaned on. A prefix that two sessions answer to resolves to
-	 * nothing rather than to a guess.
+	 * Three attempts, weakest last. The exact match is the only one that is certain. The tab caption
+	 * for a long title is truncated with an ellipsis by Claude Code itself, before VS Code sees it -
+	 * measured `Claude capabilities over…`, in `aria-label` as well as in the label text, with no
+	 * untruncated copy anywhere in the DOM - and `sessionIdForLabel` compares exactly, so a long
+	 * title never resolves without the prefix pass. The sole-live-session fallback then covers a
+	 * tab still captioned "Claude Code", which is what `resolveSession` has always leaned on. A
+	 * prefix that two sessions answer to resolves to nothing rather than to a guess.
 	 */
 	private sessionForTab(tabKey: string | undefined, caption: string): string | undefined {
 		const workspace = this.workspace;
@@ -825,24 +835,35 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 	/**
 	 * The session this tab holds, claiming one if it has none yet.
 	 *
-	 * Order matters and is deliberate: an existing claim wins, so a tab keeps its session for as
-	 * long as it is open even if a session with the same title appears later. Otherwise the first
-	 * candidate no OTHER tab has claimed is taken, which is what makes two same-titled tabs land on
-	 * two different sessions. If every candidate is claimed - more tabs than sessions - the best
-	 * candidate is used anyway rather than leaving that panel with nothing, since sharing a note is
-	 * a better failure than refusing to save.
+	 * Order matters and is deliberate: an existing claim wins while the caption still answers to
+	 * it, so a tab keeps its session even if a session with the same title appears later. It also
+	 * wins while the caption answers to nothing at all, because a retitle can reach the tab before
+	 * it reaches the transcript. What it does NOT survive is the caption naming other sessions and
+	 * not this one: that is a new conversation started in the same tab, and holding on to the old
+	 * session left the tab showing an ended session's read-only note with the live one unreachable.
+	 *
+	 * Otherwise the first candidate no OTHER tab has claimed is taken, which is what makes two
+	 * same-titled tabs land on two different sessions. If every candidate is claimed - more tabs
+	 * than sessions - the best candidate is used anyway rather than leaving that panel with nothing,
+	 * since sharing a note is a better failure than refusing to save.
 	 */
 	private bindTab(tabKey: string | undefined, caption: string, sessions: SessionRow[]): SessionRow | undefined {
+		const candidates = matchSessions(caption, sessions);
 		const claimed = tabKey ? this.claims.get(tabKey) : undefined;
-		if (claimed) {
+		if (claimed && tabKey) {
 			const held = sessions.find(session => session.id === claimed);
-			if (held) {
+			if (held && (candidates.length === 0 || candidates.includes(held))) {
 				return held;
 			}
-			// The session it held is gone from the scan; the claim is worthless, so it goes.
-			this.claims.delete(tabKey as string);
+			// Either the session it held is gone from the scan, or the tab has moved on to another
+			// one. The claim is worthless both ways, so it goes.
+			this.claims.delete(tabKey);
+			if (held) {
+				this.trace(
+					`tab ${tabKey.slice(-12)} moved on from ${claimed.slice(0, 8)}: "${caption}" names another session`
+				);
+			}
 		}
-		const candidates = matchSessions(caption, sessions);
 		if (candidates.length === 0) {
 			return undefined;
 		}
