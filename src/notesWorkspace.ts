@@ -43,6 +43,12 @@ export interface SessionRow {
 	/** Every text a Claude tab can be captioned with for this session - see `sessionNames`. */
 	names: string[];
 	live: boolean;
+	/**
+	 * The messaging address of a running session - `ainotes-cb`. Live rows only, because the name
+	 * belongs to the process: see `liveSessionName`. It is what the pane's footer shows, so it is
+	 * also how a reader tells two same-titled sessions apart in the picker.
+	 */
+	name?: string;
 	lastActivity?: number;
 	pid?: number;
 }
@@ -252,6 +258,7 @@ export class NotesWorkspace implements vscode.Disposable {
 				label: sessionLabel(session),
 				names: sessionNames(session),
 				live: session.live,
+				name: session.name,
 				lastActivity: session.lastActivity ?? session.startedAt,
 				pid: session.pid
 			}))

@@ -21,6 +21,10 @@ that tab, not to the window or the file you were looking at.
 - **The footer shows the session's messaging address** - `ainotes-2f`, the same name Claude quotes
   when you ask it how another session can reach it. It reads `not running` when the session's process
   has gone, because that name belongs to the process and stops existing with it.
+- **Select Claude Session**, the link beside that address, appears whenever the panel is attached to
+  no running session - which is what renaming a session elsewhere does to it. It lists the sessions
+  running in this folder, and picking one takes the text in the field along: filed as that session's
+  note if it has none, appended under a `---` rule if it has. See *Picking a session by hand*.
 - **The side panel** in the activity bar has two tabs. **Session Notes** shows the state of the
   injection and lists the Claude Code tabs currently open. **Double-click** a row to focus that tab;
   it flashes orange three times so you can see which one it was. Two tabs whose sessions share a
@@ -122,6 +126,17 @@ is a **loader** - a framed page that draws nothing of its own. The note pane it 
 loader at runtime** over the same road the notes travel. So the revision above is a hash of those two
 installed files only, and changing how the pane looks or behaves does not move it: update the
 extension, restart VS Code, and the new pane is there with no re-patching.
+
+**And the installed script carries messages without reading them.** It used to name every message kind
+and every field it forwarded, which meant that teaching the pane and the extension one new word - a
+list of sessions to draw, a session picked - cost a re-patch and a restart of the editor. It now
+forwards anything it does not recognise, in both directions, stamping on the panel id, the tab caption
+and the tab id, which are the three things the framed page cannot know and must not be trusted to
+supply. A few kinds are still handled by name, and only because each does something locally: `ready`
+registers the panel, `updateInjections` must work in a panel that never bound to a tab, `save` marks
+the `n`/`N` button and applies the panel height, and `notes`, `error` and `stale` set whether the panel
+is considered connected. So a new message between the pane and the extension now costs an extension
+reload, not a patch and a restart.
 
 That works because of one asymmetry. The workbench document allows no inline script and refuses every
 HTML sink through Trusted Types; the framed page has no CSP at all - it declares none and VS Code adds
@@ -357,6 +372,33 @@ only the extension host can read - and Claude Code's extension exports nothing (
 `data-resource-name` be read from the extension host, which is why the list is sourced from the DOM
 rather than from `vscode.window.tabGroups`. The caption remains how a session is *found* the first
 time; the tab id is what the binding is *kept* under.
+
+### Picking a session by hand
+
+Caption matching has one failure the reader cannot argue with: **rename a session somewhere else -
+from the phone, from claude.ai - and the tab's caption and the session's title stop agreeing.** The
+panel then resolves to the session the stale caption still names, which is usually one that has
+ended, so the footer reads `not running` and the note has gone read-only.
+
+So the footer carries a **Select Claude Session** link whenever the panel is attached to no running
+session - beside `not running`, and beside `not connected` when nothing matched at all. It opens a
+list of the sessions **running in this folder** over the note: the session's title on the first line,
+and its messaging address, how long ago it last wrote anything, and whether it already has notes on
+the second, which is what tells two sessions with the same title apart. Escape closes it, the arrow
+keys walk it.
+
+Picking a row does two things. The panel is **pinned** to that session, and a pin outranks every
+caption match - without that, the one-second sweep would pull the panel straight back onto the stale
+caption's session a moment later. And the text in the field **travels with you**: into a session with
+no notes it is filed as its note, and into a session that already has notes it is appended, under a
+`---` rule on its own line. Text the target already holds is not appended twice, so picking the same
+session again is harmless.
+
+Two deliberate limits. Only running sessions are listed, because a note whose session has ended
+cannot take new text - the store refuses the write - so offering one would silently drop what you
+carried. And the note you came *from* is left exactly as it was: this carries your text forward, it
+does not move it out. The pin lives in memory, like the automatic binding it overrides, because a tab
+id is minted per editor and means nothing after a reload.
 
 ## Commands
 

@@ -29,6 +29,15 @@
 	border-color: #c96442;
 }
 
+/* The note area, and the anchor the session picker covers. Sized by the flex box above rather than
+   by any number here, so the picker fits whatever height the pane has been dragged to. */
+#note {
+	position: relative;
+	flex: 1 1 auto;
+	min-height: 0;
+	display: flex;
+}
+
 textarea {
 	flex: 1 1 auto;
 	min-height: 0;
@@ -109,4 +118,113 @@ textarea::placeholder {
    with the note for attention. */
 #status.bad {
 	color: #e06c5c;
+}
+
+/* The link that opens the picker, beside the address it is the remedy for. A link rather than a
+   button: it is one word of recovery in a metadata line, and a button there would read as heavier
+   than the note it sits under. */
+#pick {
+	flex: 0 0 auto;
+	color: #6cb6ff;
+	cursor: pointer;
+	text-decoration: underline;
+}
+
+#pick:hover,
+#pick:focus-visible {
+	color: #8fc8ff;
+}
+
+/* The picker itself: it covers the note area, not the whole box, so the footer and the link that
+   opened it stay where they were. Its own background, because the note behind it must not read
+   through the rows. */
+#sessions {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+	background: #232323;
+}
+
+#sessions[hidden] {
+	display: none;
+}
+
+#sessions-head {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 0 2px 4px;
+	border-bottom: 1px solid #3a3a3a;
+	color: #b8b8b8;
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 18px;
+}
+
+#sessions-close {
+	margin-left: auto;
+	color: #7a7a7a;
+	cursor: pointer;
+	font-size: 12px;
+	line-height: 1;
+	padding: 2px 4px;
+}
+
+#sessions-close:hover,
+#sessions-close:focus-visible {
+	color: #e6e6e6;
+}
+
+#sessions-list {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	outline: none;
+}
+
+/* One row per running session: what it is called on the first line, how to tell it apart on the
+   second. Two lines rather than one, because the label is a title or a prompt and is routinely long
+   enough to be cut - and then the address and the age are the only things left to choose by. */
+.session-row {
+	display: block;
+	width: 100%;
+	box-sizing: border-box;
+	padding: 4px 6px;
+	border: none;
+	border-radius: 6px;
+	background: transparent;
+	color: #d6d6d6;
+	cursor: pointer;
+	font: 11px/1.4 "Segoe UI", sans-serif;
+	text-align: left;
+}
+
+.session-row:hover,
+.session-row:focus-visible {
+	background: #2f2f2f;
+	outline: none;
+}
+
+.session-row .row-label {
+	display: block;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.session-row .row-detail {
+	display: block;
+	color: #7a7a7a;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Nothing to pick, or nothing yet. Muted and not a row, so it cannot be clicked or focused. */
+#sessions-list .empty {
+	padding: 6px;
+	color: #7a7a7a;
+	font: 11px/1.5 "Segoe UI", sans-serif;
 }

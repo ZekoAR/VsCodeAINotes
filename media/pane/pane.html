@@ -7,10 +7,27 @@
      older than the extension, files replaced but not yet loaded - belong to the loader, because they
      are exactly the states where this pane may not be able to run at all. -->
 <div id="box">
-	<textarea id="text" placeholder="Notes for this Claude session..." spellcheck="false" disabled></textarea>
+	<!-- The note and the session picker share this area, and the picker covers it rather than
+	     replacing it in the flow: the pane's height is dragged by the reader and can be small, so a
+	     list that pushed the footer out of the box would be the first thing to be clipped. The
+	     footer stays visible underneath it, which is where the link that opened the picker lives. -->
+	<div id="note">
+		<textarea id="text" placeholder="Notes for this Claude session..." spellcheck="false" disabled></textarea>
+		<div id="sessions" hidden>
+			<div id="sessions-head">
+				<span>Select Claude Session</span>
+				<a id="sessions-close" role="button" tabindex="0" title="Close">&#10005;</a>
+			</div>
+			<div id="sessions-list" role="listbox" tabindex="-1" aria-label="Running Claude sessions"></div>
+		</div>
+	</div>
 	<div id="foot">
 		<span id="title">AI Notes</span>
 		<span id="session">loading...</span>
+		<!-- Only offered while this pane is attached to no running session, which is exactly when the
+		     address beside it reads `not running` or `not connected`. A healthy note keeps its quiet
+		     footer, and nothing invites a re-bind by accident. -->
+		<a id="pick" role="button" tabindex="0" hidden>Select Claude Session</a>
 		<span id="status"></span>
 	</div>
 </div>

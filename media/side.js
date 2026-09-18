@@ -168,6 +168,22 @@
 				vscode.postMessage({ type: 'runInjector' });
 				return;
 			}
+			if (message.kind === 'sessions' || message.kind === 'pick') {
+				// The pane's session picker, both halves of it: the request for the list of running
+				// sessions, and the session that was picked with the text to carry into it. Carried
+				// across with the panel and tab ids intact; the extension decides everything else.
+				const outbound = {
+					type: message.kind === 'sessions' ? 'injectedSessions' : 'injectedPick',
+					panel: message.panel,
+					caption: message.caption,
+					tabKey: message.tabKey,
+					sessionId: message.sessionId,
+					text: message.text || ''
+				};
+				console.log('[AI Notes] side -> extension', outbound);
+				vscode.postMessage(outbound);
+				return;
+			}
 			if (message.kind === 'register' || message.kind === 'save' || message.kind === 'height') {
 				const outbound = {
 					type:
@@ -208,6 +224,17 @@
 				js: message.js,
 				revision: message.revision,
 				needs: message.needs
+			});
+			return;
+		}
+		if (message && message.type === 'injectedSessionList') {
+			// The running sessions, on their way to the pane that asked. Only the extension can turn
+			// a transcript into a title and an address, which is why the list is built up there and
+			// only drawn down here.
+			toInjected({
+				kind: 'sessions',
+				panel: message.panel,
+				sessions: message.sessions || []
 			});
 			return;
 		}

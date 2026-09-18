@@ -4,6 +4,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import * as vscode from 'vscode';
 import { NoteChange, NotesWorkspace, SessionRow } from './notesWorkspace';
+import { describeAge } from './sessions';
 import { SnippetLibrary, copySnippet } from './snippets';
 
 /**
@@ -48,6 +49,31 @@ function matchSessions<T extends { names: string[] }>(caption: string, sessions:
 	}
 	const hits = sessions.filter(session => session.names.some(name => name.startsWith(stem)));
 	return hits.length === 1 ? hits : [];
+}
+
+/**
+ * Carry a pane's text into another session's note.
+ *
+ * Appended under a `---` rule on its own line, never written over: the notes the target session
+ * already has were written for it, and are not another pane's to replace. An empty target simply
+ * takes the text, which is the other half of the rule.
+ *
+ * Text the target already holds is not appended a second time. Without that, picking a session,
+ * being pushed the merged note, and picking it again - the obvious thing to do if the first attempt
+ * looked like it had not worked - would stack the same paragraph up on every try.
+ */
+function mergeNotes(existing: string, carried: string): string {
+	const text = carried.trim();
+	if (!text) {
+		return existing;
+	}
+	if (!existing.trim()) {
+		return carried;
+	}
+	if (existing.includes(text)) {
+		return existing;
+	}
+	return `${existing.replace(/\s+$/, '')}\n\n---\n\n${carried.replace(/^\s+/, '')}`;
 }
 
 /**
@@ -105,6 +131,15 @@ type InboundMessage =
 			loader?: number;
 	  }
 	| { type: 'injectedSave'; panel: string; caption: string; tabKey?: string; text: string }
+	| { type: 'injectedSessions'; panel: string; caption: string; tabKey?: string }
+	| {
+			type: 'injectedPick';
+			panel: string;
+			caption: string;
+			tabKey?: string;
+			sessionId: string;
+			text: string;
+	  }
 	| { type: 'injectedHeight'; panel: string; caption: string; tabKey?: string; height: number }
 	| { type: 'generalSave'; text: string }
 	| { type: 'generalHeight'; height: number }
@@ -284,6 +319,20 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 	private readonly claims = new Map<string, string>();
 
 	/**
+	 * Sessions picked by hand in a pane's own picker, by the same tab id the claims use.
+	 *
+	 * Separate from `claims` because it outranks them, and that is the whole point of it. A claim is
+	 * a guess made from a caption and is dropped the moment the caption names other sessions - which
+	 * is exactly what a session renamed elsewhere does. Storing a hand-picked session there would
+	 * mean the next sweep, a second later, silently pulled the pane back onto the session the stale
+	 * caption matches, and the pick would look like it had done nothing.
+	 *
+	 * In memory only, for the same reason the claims are: the tab id is minted per editor, so nothing
+	 * stored under a closed tab's id could be believed after a reload.
+	 */
+	private readonly pinned = new Map<string, string>();
+
+	/**
 	 * `workspace` is absent in a window with no folder open. The provider is registered anyway: a
 	 * view whose provider never registers shows a loading bar for the lifetime of the window, so the
 	 * panel has to be able to say what is wrong itself.
@@ -363,6 +412,12 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 					return;
 				case 'injectedSave':
 					this.injectedSave(message.panel, message.caption, message.text, message.tabKey);
+					return;
+				case 'injectedSessions':
+					this.postSessionList(message.panel);
+					return;
+				case 'injectedPick':
+					this.injectedPick(message.panel, message.sessionId, message.text, message.tabKey);
 					return;
 				case 'injectedHeight':
 					this.injectedHeight(message.caption, message.height, message.tabKey);
@@ -848,6 +903,21 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 	 * since sharing a note is a better failure than refusing to save.
 	 */
 	private bindTab(tabKey: string | undefined, caption: string, sessions: SessionRow[]): SessionRow | undefined {
+		// A hand-picked session first, before the caption is even looked at. The reader has said which
+		// session this tab is working with, and no caption match outranks that - a caption is a guess,
+		// and the pick exists for the case where the guess is wrong.
+		const pinned = tabKey ? this.pinned.get(tabKey) : undefined;
+		if (pinned && tabKey) {
+			const held = sessions.find(session => session.id === pinned);
+			if (held) {
+				return held;
+			}
+			// Not in the scan at all, live or past: the session's transcript is gone, or the folder
+			// scanned is no longer the one it ran in. Nothing can be shown for it, so the pin goes and
+			// the caption gets its turn.
+			this.pinned.delete(tabKey);
+			this.trace(`pinned session ${pinned.slice(0, 8)} is no longer known - pin released`);
+		}
 		const candidates = matchSessions(caption, sessions);
 		const claimed = tabKey ? this.claims.get(tabKey) : undefined;
 		if (claimed && tabKey) {
@@ -884,6 +954,14 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 			if (!open.has(key)) {
 				this.claims.delete(key);
 				this.trace(`released the claim of a closed tab ${key.slice(-12)}`);
+			}
+		}
+		// A pick belongs to the tab it was made in, so it dies with that tab. Kept any longer it
+		// would be handed to whatever tab VS Code next mints the same id for.
+		for (const key of [...this.pinned.keys()]) {
+			if (!open.has(key)) {
+				this.pinned.delete(key);
+				this.trace(`released the picked session of a closed tab ${key.slice(-12)}`);
 			}
 		}
 	}
@@ -989,6 +1067,101 @@ export class SidePanelProvider implements vscode.WebviewViewProvider {
 		// it meant treating the field as settled - which it is not, because more may have been typed
 		// while the write was in flight. Failures still travel; success is silence.
 		this.trace(`save ${panel} session=${sessionId.slice(0, 8)} ${text.length} chars`);
+	}
+
+	/**
+	 * The running sessions, for the picker in a pane's footer.
+	 *
+	 * Running only, and that is the rule rather than an omission: a note whose session has ended is
+	 * history and the store refuses new text for it, so offering one would silently drop whatever the
+	 * reader carried across. The pane says so in place of the rows when nothing is running here.
+	 *
+	 * Each row carries what it takes to tell two sessions with the same title apart - the messaging
+	 * address the footer shows, when the session last wrote anything, and whether it already has
+	 * notes, which is what decides whether the carried text is filed or appended.
+	 */
+	private postSessionList(panel: string): void {
+		const workspace = this.workspace;
+		if (!workspace) {
+			this.pushError(panel, 'no folder is open in this window, so there is nowhere to file a note');
+			return;
+		}
+		const current = this.registered.get(panel)?.sessionId;
+		const sessions = workspace
+			.listSessions()
+			.filter(row => row.live)
+			.map(row => {
+				const noteId = workspace.noteIdForSession(row.id);
+				return {
+					id: row.id,
+					label: row.label,
+					agent: row.name,
+					age: describeAge(row.lastActivity),
+					// Non-empty, not merely filed: an empty note row is not "has notes", and it is the
+					// same thing the `n`/`N` button on the tab means by it.
+					hasNote: Boolean(noteId && (workspace.note(noteId)?.text ?? '').trim()),
+					current: row.id === current
+				};
+			});
+		this.trace(`sessions -> ${panel}: ${sessions.length} running`);
+		void this.view?.webview.postMessage({ type: 'injectedSessionList', panel, sessions });
+	}
+
+	/**
+	 * Link a panel to the session its reader picked, taking the text in the field along.
+	 *
+	 * The session is looked up again rather than taken on trust: the id travelled out through two
+	 * webviews and back, and a session can end between being listed and being picked. That lookup is
+	 * also what warms the scan the bind below needs, so a pick from a cold panel cannot silently file
+	 * a note against a session the workspace cannot resolve.
+	 */
+	private injectedPick(panel: string, sessionId: string, text: string, tabKey?: string): void {
+		const workspace = this.workspace;
+		if (!workspace || typeof sessionId !== 'string' || !sessionId) {
+			this.pushError(panel, 'nothing to link to: no folder is open in this window');
+			return;
+		}
+		const chosen = workspace.listSessions().find(row => row.id === sessionId && row.live);
+		if (!chosen) {
+			this.pushError(panel, 'that session is not running any more - pick another');
+			return;
+		}
+		const carried = typeof text === 'string' ? text : '';
+		if (tabKey) {
+			this.pinned.set(tabKey, chosen.id);
+			this.claims.set(tabKey, chosen.id);
+			// The caption-to-session cache is keyed on the captions it was resolved for, and a pick
+			// changes no caption, so nothing else would invalidate it: the side panel's list would go
+			// on showing the session this tab's caption matches instead of the one just picked.
+			this.titleKey = '';
+		}
+		const existingId = workspace.noteIdForSession(chosen.id);
+		if (carried.trim()) {
+			// Creates and binds a note when the session has none, which is the "use the text in the
+			// field" half of the rule. With nothing to carry it is deliberately not called: a session
+			// somebody merely linked to should not gain an empty note row in the file.
+			const note = workspace.noteForSession(chosen.id);
+			if (workspace.isReadOnly(note.id)) {
+				// The session ended between the scan above and here. `setText` drops writes to a note
+				// like that silently, so without this the pane would look like it had carried the text.
+				this.pushError(panel, 'this session has ended - notes here are read-only');
+				return;
+			}
+			const existing = existingId ? (workspace.note(existingId)?.text ?? '') : '';
+			const merged = mergeNotes(existing, carried);
+			if (merged !== existing) {
+				// This panel is the origin, so the change event is not echoed back to it - the push
+				// below is what tells it, and it carries the merged text rather than what it sent.
+				workspace.setText(note.id, merged, panel);
+			}
+		}
+		this.trace(
+			`pick ${panel} -> ${chosen.id.slice(0, 8)} "${chosen.label}", ` +
+				`${carried.trim() ? `${carried.length} chars carried` : 'nothing carried'}, ` +
+				`${existingId ? 'appended to an existing note' : 'filed as a new note'}`
+		);
+		this.pushNotes(panel, chosen.id);
+		this.postRows();
 	}
 
 	/**

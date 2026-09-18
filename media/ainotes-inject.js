@@ -281,6 +281,48 @@
 	}
 
 	/**
+	 * A message's contents, without the two fields that say where it came from.
+	 *
+	 * Copied field by field rather than named one by one, and that is the whole point of it. This
+	 * file is the only part of AI Notes that lives inside the VS Code install, so it is the only part
+	 * whose replacement costs a re-patch and a full restart - and while it named every field of every
+	 * message, teaching the pane and the extension one new word cost exactly that. Now it carries
+	 * whatever they say to each other and understands none of it.
+	 *
+	 * `source` and `panel` are dropped because both directions stamp their own: the frame's copy is
+	 * re-stamped with the id of the panel it actually came from, and the frame filters on the source.
+	 */
+	function contents(message) {
+		const out = {};
+		for (const name of Object.keys(message)) {
+			if (name === 'source' || name === 'panel') {
+				continue;
+			}
+			out[name] = message[name];
+		}
+		return out;
+	}
+
+	/**
+	 * Carry a message from a panel's framed page up to the side panel, under the tab that panel is
+	 * bound to. False when there is no side panel listening, which the caller reports.
+	 *
+	 * The three fields stamped on here are the ones the framed page cannot know and must not be
+	 * trusted to supply: which panel this is, what its tab is captioned, and the tab's own id. They
+	 * go on last so a payload carrying fields of those names cannot pose as another panel.
+	 */
+	function forward(entry, data) {
+		return toSidePanel(
+			Object.assign(contents(data), {
+				source: 'ainotes-inject',
+				panel: entry.id,
+				caption: entry.caption,
+				tabKey: entry.tabKey
+			})
+		);
+	}
+
+	/**
 	 * The caption of the tab this container belongs to.
 	 *
 	 * The only bridge between the DOM and a Claude session, since the Claude webview's own url
@@ -1192,42 +1234,49 @@
 					entry.loader = data.loader;
 				}
 				register(entry);
-			} else if (data.kind === 'updateInjections') {
-				// The banner link in a stale panel. Passed straight through - deciding what "update"
-				// means is the extension's business, not this file's.
-				toSidePanel({ source: 'ainotes-inject', kind: 'updateInjections' });
-			} else if (data.kind === 'save') {
-				// Filed under the tab this panel is bound to, never a fresh reading: a save can fire just
-				// after its tab was switched away from, when a reading would name the tab now showing.
-				if (!entry.bound) {
-					toFrame(entry, {
-						kind: 'error',
-						problem: 'could not tell which tab this panel is in - your text is unsaved'
-					});
-					return;
-				}
-				markNote(entry, Boolean((data.text || '').trim()));
-			if (typeof data.height === 'number' && data.height >= PANEL_MIN) {
-				setPanelHeight(entry, entry.frame.parentElement, entry.button, data.height);
+				return;
 			}
-				const sent = toSidePanel({
-					source: 'ainotes-inject',
-					kind: 'save',
-					panel: entry.id,
-					caption: entry.caption,
-					tabKey: entry.tabKey,
-					text: data.text || ''
+			if (data.kind === 'updateInjections') {
+				// The banner link in a stale panel. Passed straight through - deciding what "update"
+				// means is the extension's business, not this file's - and deliberately not through the
+				// forward below: a stale panel may never have bound to a tab, and this is the one
+				// message that must work in that state, since it is what replaces the payload.
+				toSidePanel({ source: 'ainotes-inject', kind: 'updateInjections' });
+				return;
+			}
+
+			// Everything else is filed under the tab this panel is bound to, never a fresh reading: a
+			// message can arrive just after its tab was switched away from, when a reading would name
+			// the tab now showing.
+			//
+			// What is at stake if it does not arrive. A save is the only one holding text that exists
+			// nowhere else, and saying so is the difference between a note the reader knows to keep and
+			// one they close the tab on.
+			const risk = data.kind === 'save' ? ' - your text is unsaved' : '';
+			if (!entry.bound) {
+				toFrame(entry, {
+					kind: 'error',
+					problem: 'could not tell which tab this panel is in' + risk
 				});
-				if (!sent) {
-					// A save with nowhere to go must be reported, not swallowed: the text is still in
-					// the box, and the frame keeps it marked unsaved so a later push cannot overwrite
-					// it. Marking this unconnected makes the sweep re-register and recover.
-					entry.connected = false;
-					toFrame(entry, {
-						kind: 'error',
-						problem: 'AI Notes side panel is not available - your text is unsaved'
-					});
+				return;
+			}
+			if (data.kind === 'save') {
+				// The two things a save changes HERE, before it goes anywhere: the button on the tab,
+				// which reads whether there is a note without opening it, and the panel's height.
+				markNote(entry, Boolean((data.text || '').trim()));
+				if (typeof data.height === 'number' && data.height >= PANEL_MIN) {
+					setPanelHeight(entry, entry.frame.parentElement, entry.button, data.height);
 				}
+			}
+			if (!forward(entry, data)) {
+				// A message with nowhere to go must be reported, not swallowed. For a save the text is
+				// still in the box, and the frame keeps it marked unsaved so a later push cannot
+				// overwrite it. Marking this unconnected makes the sweep re-register and recover.
+				entry.connected = false;
+				toFrame(entry, {
+					kind: 'error',
+					problem: 'AI Notes side panel is not available' + risk
+				});
 			}
 			return;
 		}
@@ -1263,44 +1312,26 @@
 		if (!entry) {
 			return;
 		}
+		// What each answer means for the panel itself. The message then goes down whole, whatever it
+		// is: the pane and the loader read it, and this file needs to know nothing about the pane's
+		// own vocabulary to carry it - a note, a pushed pane, a list of sessions, or whatever the
+		// extension sends next.
 		if (data.kind === 'stale') {
 			// Stops announcing itself: re-registering cannot help until the payload is replaced and
 			// the window reloaded, and the extension would answer identically every three seconds.
 			entry.stale = true;
 			entry.connected = false;
-			toFrame(entry, { kind: 'stale', installed: data.installed, expected: data.expected });
-			return;
-		}
-		if (data.kind === 'ui') {
-			toFrame(entry, {
-				kind: 'ui',
-				css: data.css,
-				html: data.html,
-				js: data.js,
-				revision: data.revision,
-				needs: data.needs
-			});
-			return;
-		}
-		if (data.kind === 'notes') {
+		} else if (data.kind === 'notes') {
 			entry.connected = true;
 			entry.diagnosed = false;
 			markNote(entry, Boolean((data.text || '').trim()));
-			toFrame(entry, {
-				kind: 'notes',
-				sessionId: data.sessionId,
-				agent: data.agent,
-				text: data.text || ''
-			});
-			return;
-		}
-		if (data.kind === 'error') {
+		} else if (data.kind === 'error') {
 			// Stays unconnected on purpose, so the sweep keeps announcing it. A session that is not
 			// resolvable yet - a tab just reopened, a session still starting - becomes resolvable
 			// without anyone pressing anything.
 			entry.connected = false;
-			toFrame(entry, { kind: 'error', problem: data.problem });
 		}
+		toFrame(entry, contents(data));
 	}
 
 	window.addEventListener('message', onMessage);
