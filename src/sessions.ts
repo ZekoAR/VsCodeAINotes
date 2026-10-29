@@ -60,7 +60,7 @@ function expandHome(p: string): string {
 
 /**
  * Claude Code names a project's transcript folder after its absolute path with every character
- * that is not a letter or a digit replaced by a dash: `c:\D\AINotes` -> `c--D-AINotes`.
+ * that is not a letter or a digit replaced by a dash: `d:\ClaudeCodeNotes` -> `c--D-AINotes`.
  */
 export function encodeProjectDirName(cwd: string): string {
 	return cwd.replace(/[^a-zA-Z0-9]/g, '-');

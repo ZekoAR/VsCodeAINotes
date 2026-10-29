@@ -120,7 +120,7 @@ export function notesHome(): string {
 
 /**
  * The notes file for a workspace folder, named with the encoding Claude Code gives that folder's
- * transcripts: `c:\D\AINotes` -> `~/.ainotes/c--D-AINotes.json`.
+ * transcripts: `d:\ClaudeCodeNotes` -> `~/.ainotes/c--D-AINotes.json`.
  *
  * Matched case-insensitively against what is on disk before falling back to the computed name, for
  * the same reason `projectTranscriptDir` is: VS Code and Claude Code do not always agree on the

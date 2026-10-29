@@ -311,7 +311,7 @@ Titles are read from the last 512 KB of the transcript rather than by parsing th
 on transcripts up to 14.4 MB, the last `ai-title` sat between 2.5 KB and 31 KB from the end.
 
 The transcript folder name is the workspace path with every non-alphanumeric character replaced by a
-dash (`c:\D\AINotes` becomes `c--D-AINotes`). VS Code and Claude Code do not always agree on the drive
+dash (`d:\ClaudeCodeNotes` becomes `c--D-AINotes`). VS Code and Claude Code do not always agree on the drive
 letter's case, so the folder is matched case-insensitively against what is on disk.
 
 ### How a panel knows which session it is in
